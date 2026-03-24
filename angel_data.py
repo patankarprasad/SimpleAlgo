@@ -1,0 +1,147 @@
+"""
+Fetch OHLCV candle data from Angel SmartAPI.
+
+The instrument dict passed to get_candles() must already be resolved by
+scrip_master.resolve_instrument() so it contains:
+  angel_token    – numeric token string from the scrip master
+  angel_exchange – exchange string (MCX / NFO)
+
+Angel interval strings:
+  ONE_MINUTE, THREE_MINUTE, FIVE_MINUTE, TEN_MINUTE,
+  FIFTEEN_MINUTE, THIRTY_MINUTE, ONE_HOUR, ONE_DAY
+"""
+import logging
+import time
+from datetime import datetime, timedelta
+
+import pandas as pd
+
+import config
+from angel_login import get_angel_session
+
+logger = logging.getLogger(__name__)
+
+# ── Interval string normalisation ──────────────────────────────────────────────
+INTERVAL_MAP = {
+    # Short aliases (used in .env)
+    "1minute":        "ONE_MINUTE",
+    "3minute":        "THREE_MINUTE",
+    "5minute":        "FIVE_MINUTE",
+    "10minute":       "TEN_MINUTE",
+    "15minute":       "FIFTEEN_MINUTE",
+    "30minute":       "THIRTY_MINUTE",
+    "60minute":       "ONE_HOUR",
+    "day":            "ONE_DAY",
+    # Native Angel strings (accepted as-is)
+    "ONE_MINUTE":     "ONE_MINUTE",
+    "THREE_MINUTE":   "THREE_MINUTE",
+    "FIVE_MINUTE":    "FIVE_MINUTE",
+    "TEN_MINUTE":     "TEN_MINUTE",
+    "FIFTEEN_MINUTE": "FIFTEEN_MINUTE",
+    "THIRTY_MINUTE":  "THIRTY_MINUTE",
+    "ONE_HOUR":       "ONE_HOUR",
+    "ONE_DAY":        "ONE_DAY",
+}
+
+
+def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
+    """
+    Fetch the last `n_candles` OHLCV candles for an instrument.
+
+    `instrument` must be a resolved dict (from scrip_master.resolve_instrument)
+    containing at minimum:
+        angel_token    – token string from Angel scrip master
+        angel_exchange – exchange (MCX / NFO)
+        name           – instrument name (for logging)
+
+    Returns a DataFrame indexed by datetime with columns:
+        open, high, low, close, volume
+    """
+    n_candles = n_candles or config.CANDLE_LOOKBACK
+    interval  = INTERVAL_MAP.get(config.CANDLE_INTERVAL, config.CANDLE_INTERVAL)
+
+    # Determine a from_date that is wide enough to contain n_candles bars,
+    # accounting for weekends, holidays, and MCX evening gaps.
+    # Cap at 400 days — Angel SmartAPI returns at most ~2 years of history
+    # and the daily-interval formula would otherwise request 750+ days.
+    minutes_per_bar = _interval_minutes(interval)
+    buffer_days     = max(7, int(n_candles * minutes_per_bar / 375) + 5)
+    buffer_days     = min(buffer_days, 400)
+    from_date = datetime.now() - timedelta(days=buffer_days)
+    to_date   = datetime.now()
+
+    angel  = get_angel_session()
+    params = {
+        "exchange":    instrument["angel_exchange"],
+        "symboltoken": instrument["angel_token"],       # from scrip master – no lookup needed
+        "interval":    interval,
+        "fromdate":    from_date.strftime("%Y-%m-%d %H:%M"),
+        "todate":      to_date.strftime("%Y-%m-%d %H:%M"),
+    }
+
+    logger.info(
+        "Fetching candles: %s | exchange=%s | token=%s | interval=%s",
+        instrument["name"], params["exchange"], params["symboltoken"], interval,
+    )
+
+    # Respect Angel's rate limit between consecutive historical data calls
+    time.sleep(config.ANGEL_BASE_DELAY)
+    resp = angel.getCandleData(params)
+    if resp["status"] is False or not resp.get("data"):
+        raise RuntimeError(
+            f"Angel getCandleData failed for {instrument['name']}: {resp.get('message')}"
+        )
+
+    df = pd.DataFrame(
+        resp["data"],
+        columns=["datetime", "open", "high", "low", "close", "volume"],
+    )
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df = df.set_index("datetime").sort_index()
+    df = df.astype({c: float for c in ["open", "high", "low", "close", "volume"]})
+
+    df = df.tail(n_candles)
+    logger.info("Fetched %d candles for %s", len(df), instrument["name"])
+    return df
+
+
+# ── Interval helper ────────────────────────────────────────────────────────────
+
+def _interval_minutes(interval: str) -> int:
+    return {
+        "ONE_MINUTE":     1,
+        "THREE_MINUTE":   3,
+        "FIVE_MINUTE":    5,
+        "TEN_MINUTE":     10,
+        "FIFTEEN_MINUTE": 15,
+        "THIRTY_MINUTE":  30,
+        "ONE_HOUR":       60,
+        "ONE_DAY":        1440,
+    }.get(interval, 15)
+
+
+# ── Search helper (kept for manual token lookup / debugging) ───────────────────
+
+def search_token(symbol: str, exchange: str) -> None:
+    """
+    Print FUT contracts matching `symbol` on `exchange`.
+    Uses the Angel searchScrip API – prefer scrip_master for production use.
+    """
+    import logzero
+
+    time.sleep(config.ANGEL_SEARCH_DELAY)
+    _prev = logzero.logger.level
+    logzero.loglevel(logging.WARNING)
+    try:
+        angel = get_angel_session()
+        resp  = angel.searchScrip(exchange, symbol)
+    finally:
+        logzero.loglevel(_prev if _prev != 0 else logging.DEBUG)
+
+    if resp["status"] and resp.get("data"):
+        futures = [r for r in resp["data"] if r["tradingsymbol"].endswith("FUT")]
+        rows = futures if futures else resp["data"][:10]
+        for item in rows:
+            print(f"  symbol={item['tradingsymbol']}  token={item['symboltoken']}")
+    else:
+        print(f"  No results for {symbol} on {exchange}")

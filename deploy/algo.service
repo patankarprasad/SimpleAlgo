@@ -1,0 +1,17 @@
+[Unit]
+Description=SuperTrend Algo Trading Bot
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/SimpleAlgo
+EnvironmentFile=/home/ubuntu/SimpleAlgo/.env
+ExecStart=/home/ubuntu/SimpleAlgo/venv/bin/python main.py
+Restart=on-failure
+RestartSec=30
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target

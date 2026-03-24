@@ -1,0 +1,33 @@
+# SimpleAlgo — single systemd service for algo + web server.
+#
+# Installation (on the VPS, as root):
+# ─────────────────────────────────────
+#   sudo cp /home/ubuntu/SimpleAlgo/deploy/simplealgo.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable simplealgo
+#   sudo systemctl start  simplealgo
+#
+# Useful commands:
+#   sudo systemctl status simplealgo
+#   sudo journalctl -u simplealgo -f          # live logs
+#   sudo systemctl restart simplealgo         # after code changes
+#
+# Adjust User, WorkingDirectory, and ExecStart to match your VPS paths.
+
+[Unit]
+Description=SimpleAlgo — Supertrend Algo + Web Dashboard
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/SimpleAlgo
+ExecStart=/home/ubuntu/SimpleAlgo/venv/bin/python main.py
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

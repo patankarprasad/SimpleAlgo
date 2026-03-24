@@ -1,0 +1,31 @@
+# Systemd unit for the Kite OAuth auth server.
+#
+# Installation (on the VPS, as root):
+# ─────────────────────────────────────
+#   sudo cp /home/ubuntu/SimpleAlgo/deploy/kite_auth.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable kite_auth
+#   sudo systemctl start  kite_auth
+#
+# Logs:
+#   sudo journalctl -u kite_auth -f
+#
+# Adjust User, WorkingDirectory, and ExecStart to match your VPS paths.
+
+[Unit]
+Description=SimpleAlgo – Kite OAuth Auth Server
+After=network.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/SimpleAlgo
+ExecStart=/home/ubuntu/SimpleAlgo/venv/bin/python kite_auth_server.py
+Restart=on-failure
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target
