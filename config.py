@@ -73,22 +73,22 @@ DRY_RUN         = os.getenv("DRY_RUN", "false").strip().lower() == "true"
 
 INSTRUMENTS = [
     {
-        "name":        "GOLDM",
-        "exchange":    "MCX",
-        "qty":         1,
-        "lot_size":    10,          # MCX GOLDM = 10 grams/lot (Kite master returns 1)
-        "product":     "NRML",
-        "trade_start": "09:00",
-        "trade_end":   "23:30",
+        "name":          "GOLDM",
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 10,        # 10 grams/lot — PnL multiplier only (Kite order qty stays 1)
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
     },
     {
-        "name":        "CRUDEOIL",
-        "exchange":    "MCX",
-        "qty":         1,
-        "lot_size":    100,         # MCX CRUDEOIL = 100 barrels/lot (Kite master returns 1)
-        "product":     "NRML",
-        "trade_start": "09:00",
-        "trade_end":   "23:30",
+        "name":          "CRUDEOIL",
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 100,       # 100 barrels/lot — PnL multiplier only (Kite order qty stays 1)
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
     },
     {
         "name":        "NIFTY",

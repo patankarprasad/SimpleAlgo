@@ -189,12 +189,7 @@ def resolve_instrument(inst_def: dict) -> dict:
         inst_def["name"],
         inst_def["exchange"],           # both brokers share the same exchange name
     )
-    merged = {**inst_def, **contract}
-    # Config-defined lot_size takes precedence over scrip master
-    # (needed for MCX instruments where Kite master returns 1 instead of the real lot size)
-    if "lot_size" in inst_def:
-        merged["lot_size"] = inst_def["lot_size"]
-    return merged
+    return {**inst_def, **contract}
 
 
 def refresh_masters(force: bool = False):

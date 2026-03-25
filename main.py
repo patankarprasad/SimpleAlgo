@@ -230,7 +230,10 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         "signal": str(signal),
     })
 
-    qty = instrument["qty"] * instrument["lot_size"]
+    # order_qty: lots × kite lot_size — used for live order logs/notifications
+    # pnl_qty:   lots × contract_size — used only for paper PnL (MCX contract_size > lot_size)
+    order_qty = instrument["qty"] * instrument["lot_size"]
+    pnl_qty   = instrument["qty"] * instrument.get("contract_size", instrument["lot_size"])
 
     sym          = instrument["kite_tradingsymbol"]
     exchange     = instrument["exchange"]
@@ -252,7 +255,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     )
                     ce_ltp, pe_ltp = _fetch_option_ltps_safe(ce_info, pe_info)
                     paper_trading.open_position(
-                        name, "BUY", ce_info["kite_tradingsymbol"], qty, price,
+                        name, "BUY", ce_info["kite_tradingsymbol"], pnl_qty, price,
                         ce_symbol=ce_info["kite_tradingsymbol"],
                         pe_symbol=pe_info["kite_tradingsymbol"],
                         entry_ce_price=ce_ltp,
@@ -263,8 +266,8 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                         pe_angel_symbol=pe_info["angel_symbol"],
                     )
                     leg_sym = f"{ce_info['kite_tradingsymbol']}+{pe_info['kite_tradingsymbol']}"
-                    trade_log.log_trade(name, "BUY_SYNTHETIC", leg_sym, qty, dry_run=True)
-                    notifier.notify_paper_open(name, "BUY", ce_info["kite_tradingsymbol"], qty, price)
+                    trade_log.log_trade(name, "BUY_SYNTHETIC", leg_sym, order_qty, dry_run=True)
+                    notifier.notify_paper_open(name, "BUY", ce_info["kite_tradingsymbol"], order_qty, price)
                     logger.info(
                         "%s: [PAPER] SYNTHETIC BUY | strike=%d | CE=%s (%.2f) | PE=%s (%.2f)",
                         name, ce_info["strike"],
@@ -274,10 +277,10 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 except Exception as exc:
                     logger.error("%s: Failed to open synthetic paper BUY: %s", name, exc)
             else:
-                paper_trading.open_position(name, "BUY", sym, qty, price)
-                trade_log.log_trade(name, "BUY", sym, qty, dry_run=True)
-                notifier.notify_paper_open(name, "BUY", sym, qty, price)
-                logger.info("%s: [PAPER] BUY at %.2f qty=%d", name, price, qty)
+                paper_trading.open_position(name, "BUY", sym, pnl_qty, price)
+                trade_log.log_trade(name, "BUY", sym, order_qty, dry_run=True)
+                notifier.notify_paper_open(name, "BUY", sym, order_qty, price)
+                logger.info("%s: [PAPER] BUY at %.2f qty=%d", name, price, order_qty)
 
         elif signal == "SELL" and paper_size == 0:
             if is_synthetic:
@@ -287,7 +290,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     )
                     ce_ltp, pe_ltp = _fetch_option_ltps_safe(ce_info, pe_info)
                     paper_trading.open_position(
-                        name, "SELL", pe_info["kite_tradingsymbol"], qty, price,
+                        name, "SELL", pe_info["kite_tradingsymbol"], pnl_qty, price,
                         ce_symbol=ce_info["kite_tradingsymbol"],
                         pe_symbol=pe_info["kite_tradingsymbol"],
                         entry_ce_price=ce_ltp,
@@ -298,8 +301,8 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                         pe_angel_symbol=pe_info["angel_symbol"],
                     )
                     leg_sym = f"{ce_info['kite_tradingsymbol']}+{pe_info['kite_tradingsymbol']}"
-                    trade_log.log_trade(name, "SELL_SYNTHETIC", leg_sym, qty, dry_run=True)
-                    notifier.notify_paper_open(name, "SELL", pe_info["kite_tradingsymbol"], qty, price)
+                    trade_log.log_trade(name, "SELL_SYNTHETIC", leg_sym, order_qty, dry_run=True)
+                    notifier.notify_paper_open(name, "SELL", pe_info["kite_tradingsymbol"], order_qty, price)
                     logger.info(
                         "%s: [PAPER] SYNTHETIC SELL | strike=%d | CE=%s (%.2f) | PE=%s (%.2f)",
                         name, pe_info["strike"],
@@ -309,10 +312,10 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 except Exception as exc:
                     logger.error("%s: Failed to open synthetic paper SELL: %s", name, exc)
             else:
-                paper_trading.open_position(name, "SELL", sym, qty, price)
-                trade_log.log_trade(name, "SELL", sym, qty, dry_run=True)
-                notifier.notify_paper_open(name, "SELL", sym, qty, price)
-                logger.info("%s: [PAPER] SELL at %.2f qty=%d", name, price, qty)
+                paper_trading.open_position(name, "SELL", sym, pnl_qty, price)
+                trade_log.log_trade(name, "SELL", sym, order_qty, dry_run=True)
+                notifier.notify_paper_open(name, "SELL", sym, order_qty, price)
+                logger.info("%s: [PAPER] SELL at %.2f qty=%d", name, price, order_qty)
 
         elif signal in ("EXIT_LONG", "SELL") and paper_size > 0:
             if is_synthetic:
@@ -330,7 +333,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     result = paper_trading.close_position(name, price)
             else:
                 result = paper_trading.close_position(name, price)
-            trade_log.log_trade(name, "EXIT_LONG", sym, qty, dry_run=True)
+            trade_log.log_trade(name, "EXIT_LONG", sym, order_qty, dry_run=True)
             notifier.notify_paper_close(result)
             logger.info("%s: [PAPER] EXIT LONG at %.2f | P&L=%.2f", name, price, result["pnl"])
 
@@ -350,7 +353,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     result = paper_trading.close_position(name, price)
             else:
                 result = paper_trading.close_position(name, price)
-            trade_log.log_trade(name, "EXIT_SHORT", sym, qty, dry_run=True)
+            trade_log.log_trade(name, "EXIT_SHORT", sym, order_qty, dry_run=True)
             notifier.notify_paper_close(result)
             logger.info("%s: [PAPER] EXIT SHORT at %.2f | P&L=%.2f", name, price, result["pnl"])
 
@@ -388,8 +391,8 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     kite, instrument, ce_info, pe_info
                 )
                 leg_sym = f"{ce_info['kite_tradingsymbol']}+{pe_info['kite_tradingsymbol']}"
-                trade_log.log_trade(name, "BUY_SYNTHETIC", leg_sym, qty)
-                notifier.notify_trade(name, "BUY", ce_info["kite_tradingsymbol"], qty, price)
+                trade_log.log_trade(name, "BUY_SYNTHETIC", leg_sym, order_qty)
+                notifier.notify_trade(name, "BUY", ce_info["kite_tradingsymbol"], order_qty, price)
                 set_position(
                     state, name, instrument["qty"], close_price,
                     ce_info["kite_tradingsymbol"], exchange,
@@ -406,8 +409,8 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 )
         else:
             place_buy(kite, instrument)
-            trade_log.log_trade(name, "BUY", sym, qty)
-            notifier.notify_trade(name, "BUY", sym, qty, price)
+            trade_log.log_trade(name, "BUY", sym, order_qty)
+            notifier.notify_trade(name, "BUY", sym, order_qty, price)
             set_position(state, name, instrument["qty"], close_price, sym, exchange)
 
     elif signal == "SELL" and pos == 0:
@@ -420,8 +423,8 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     kite, instrument, ce_info, pe_info
                 )
                 leg_sym = f"{ce_info['kite_tradingsymbol']}+{pe_info['kite_tradingsymbol']}"
-                trade_log.log_trade(name, "SELL_SYNTHETIC", leg_sym, qty)
-                notifier.notify_trade(name, "SELL", pe_info["kite_tradingsymbol"], qty, price)
+                trade_log.log_trade(name, "SELL_SYNTHETIC", leg_sym, order_qty)
+                notifier.notify_trade(name, "SELL", pe_info["kite_tradingsymbol"], order_qty, price)
                 set_position(
                     state, name, -instrument["qty"], close_price,
                     pe_info["kite_tradingsymbol"], exchange,
@@ -438,8 +441,8 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 )
         else:
             place_sell(kite, instrument)
-            trade_log.log_trade(name, "SELL", sym, qty)
-            notifier.notify_trade(name, "SELL", sym, qty, price)
+            trade_log.log_trade(name, "SELL", sym, order_qty)
+            notifier.notify_trade(name, "SELL", sym, order_qty, price)
             set_position(state, name, -instrument["qty"], close_price, sym, exchange)
 
     # A strong SELL signal (all three bearish) while long is still an exit.
@@ -456,16 +459,16 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 ce_oid, pe_oid, exit_ce_ltp, exit_pe_ltp = close_synthetic_long(
                     kite, instrument, ce_sym, pe_sym
                 )
-                trade_log.log_trade(name, "EXIT_LONG", f"{ce_sym}+{pe_sym}", qty)
-                notifier.notify_trade(name, "EXIT_LONG", ce_sym, qty, price)
+                trade_log.log_trade(name, "EXIT_LONG", f"{ce_sym}+{pe_sym}", order_qty)
+                notifier.notify_trade(name, "EXIT_LONG", ce_sym, order_qty, price)
                 set_position(state, name, 0)
             except RuntimeError as exc:
                 logger.error("%s: Synthetic EXIT LONG failed: %s", name, exc, exc_info=True)
                 notifier.notify_synthetic_partial_fill(name, ce_sym, pe_sym, str(exc))
         else:
             close_long(kite, instrument)
-            trade_log.log_trade(name, "EXIT_LONG", sym, qty)
-            notifier.notify_trade(name, "EXIT_LONG", sym, qty, price)
+            trade_log.log_trade(name, "EXIT_LONG", sym, order_qty)
+            notifier.notify_trade(name, "EXIT_LONG", sym, order_qty, price)
             set_position(state, name, 0)
 
     # Symmetric: strong BUY while short is still an exit.
@@ -480,16 +483,16 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 ce_oid, pe_oid, exit_ce_ltp, exit_pe_ltp = close_synthetic_short(
                     kite, instrument, ce_sym, pe_sym
                 )
-                trade_log.log_trade(name, "EXIT_SHORT", f"{ce_sym}+{pe_sym}", qty)
-                notifier.notify_trade(name, "EXIT_SHORT", pe_sym, qty, price)
+                trade_log.log_trade(name, "EXIT_SHORT", f"{ce_sym}+{pe_sym}", order_qty)
+                notifier.notify_trade(name, "EXIT_SHORT", pe_sym, order_qty, price)
                 set_position(state, name, 0)
             except RuntimeError as exc:
                 logger.error("%s: Synthetic EXIT SHORT failed: %s", name, exc, exc_info=True)
                 notifier.notify_synthetic_partial_fill(name, pe_sym, ce_sym, str(exc))
         else:
             close_short(kite, instrument)
-            trade_log.log_trade(name, "EXIT_SHORT", sym, qty)
-            notifier.notify_trade(name, "EXIT_SHORT", sym, qty, price)
+            trade_log.log_trade(name, "EXIT_SHORT", sym, order_qty)
+            notifier.notify_trade(name, "EXIT_SHORT", sym, order_qty, price)
             set_position(state, name, 0)
 
     else:
