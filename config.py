@@ -76,6 +76,7 @@ INSTRUMENTS = [
         "name":        "GOLDM",
         "exchange":    "MCX",
         "qty":         1,
+        "lot_size":    10,          # MCX GOLDM = 10 grams/lot (Kite master returns 1)
         "product":     "NRML",
         "trade_start": "09:00",
         "trade_end":   "23:30",
@@ -84,6 +85,7 @@ INSTRUMENTS = [
         "name":        "CRUDEOIL",
         "exchange":    "MCX",
         "qty":         1,
+        "lot_size":    100,         # MCX CRUDEOIL = 100 barrels/lot (Kite master returns 1)
         "product":     "NRML",
         "trade_start": "09:00",
         "trade_end":   "23:30",
@@ -91,22 +93,27 @@ INSTRUMENTS = [
     {
         "name":        "NIFTY",
         "exchange":    "NFO",
-        "qty":         1,           # 1 lot = 25 units (resolved from master)
+        "qty":         1,           # lot_size resolved from scrip master
         "product":     "NRML",
         "trade_start": "09:15",
         "trade_end":   "15:30",
+        "mode":        "SYNTHETIC", # trade as synthetic future (ATM CE + PE options)
+        "strike_step": 50,          # NIFTY strikes are multiples of 50
     },
     {
         "name":        "BANKNIFTY",
         "exchange":    "NFO",
-        "qty":         1,           # 1 lot = 30 units (resolved from master)
+        "qty":         1,           # lot_size resolved from scrip master
         "product":     "NRML",
         "trade_start": "09:15",
         "trade_end":   "15:30",
+        "mode":        "SYNTHETIC", # trade as synthetic future (ATM CE + PE options)
+        "strike_step": 100,         # BANKNIFTY strikes are multiples of 100
     },
 ]
 
 # ── Session token cache paths ──────────────────────────────────────────────────
-KITE_TOKEN_FILE  = "kite_token.json"
-ANGEL_TOKEN_FILE = "angel_token.json"
-STATE_FILE       = "positions_state.json"
+KITE_TOKEN_FILE   = "kite_token.json"
+ANGEL_TOKEN_FILE  = "angel_token.json"
+STATE_FILE        = "positions_state.json"
+PAPER_STATE_FILE  = "paper_positions_state.json"  # persisted paper trade positions

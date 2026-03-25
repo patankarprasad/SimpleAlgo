@@ -39,18 +39,38 @@ def get_position(state: dict, instrument_name: str) -> int:
     return state.get(instrument_name, {}).get("position_size", 0)
 
 
-def set_position(state: dict, instrument_name: str, position_size: int,
-                 entry_price: float = 0.0,
-                 kite_tradingsymbol: str = "",
-                 exchange: str = "") -> None:
+def set_position(
+    state: dict, instrument_name: str, position_size: int,
+    entry_price: float = 0.0,
+    kite_tradingsymbol: str = "",
+    exchange: str = "",
+    *,
+    is_synthetic: bool = False,
+    ce_tradingsymbol: str = "",
+    pe_tradingsymbol: str = "",
+    entry_ce_price: float = 0.0,
+    entry_pe_price: float = 0.0,
+) -> None:
+    """
+    Persist position state for one instrument.
+
+    On exit calls (position_size=0) the existing record's fields are preserved
+    via fallback so the rollover checker can still read the old tradingsymbol.
+    Synthetic leg fields (ce/pe tradingsymbols) are preserved the same way.
+    """
     existing = state.get(instrument_name, {})
     state[instrument_name] = {
         "position_size":      position_size,
         "entry_price":        entry_price,
-        # Preserve symbol fields from the existing record if not supplied
-        # (e.g. when calling set_position(state, name, 0) on exit).
+        # Preserve from existing if not re-supplied (e.g. on exit calls)
         "kite_tradingsymbol": kite_tradingsymbol or existing.get("kite_tradingsymbol", ""),
         "exchange":           exchange           or existing.get("exchange", ""),
+        # Synthetic futures leg data
+        "is_synthetic":       is_synthetic       or existing.get("is_synthetic", False),
+        "ce_tradingsymbol":   ce_tradingsymbol   or existing.get("ce_tradingsymbol", ""),
+        "pe_tradingsymbol":   pe_tradingsymbol   or existing.get("pe_tradingsymbol", ""),
+        "entry_ce_price":     entry_ce_price     or existing.get("entry_ce_price", 0.0),
+        "entry_pe_price":     entry_pe_price     or existing.get("entry_pe_price", 0.0),
     }
     save_state(state)
     logger.info("State updated: %s -> position_size=%d", instrument_name, position_size)

@@ -120,6 +120,67 @@ def _interval_minutes(interval: str) -> int:
     }.get(interval, 15)
 
 
+# ── Live LTP fetcher for options (used by synthetic futures) ───────────────────
+
+def get_option_ltps(options: list[dict]) -> dict[str, float]:
+    """
+    Fetch LTP for a list of option contracts via Angel getMarketData (bulk call).
+
+    All tokens are sent in a single API request regardless of count, so fetching
+    CE + PE for multiple instruments costs just one call instead of N calls.
+
+    Each dict in `options` must contain:
+        angel_token          – Angel numeric token string (e.g. "54518")
+        angel_exchange       – Exchange (e.g. "NFO")
+        kite_tradingsymbol   – Used as the key in the returned dict
+
+    Returns {kite_tradingsymbol: ltp} for each successfully fetched contract.
+    Items with missing tokens or unfetched by the API are absent from the result.
+    """
+    # Group tokens by exchange and build reverse map token -> kite_tradingsymbol
+    exchange_tokens: dict[str, list[str]] = {}
+    token_to_kite:   dict[str, str]       = {}
+
+    for opt in options:
+        token    = (opt.get("angel_token") or "").strip()
+        exch     = (opt.get("angel_exchange") or "NFO").strip()
+        kite_sym = (opt.get("kite_tradingsymbol") or "").strip()
+
+        if not token or not kite_sym:
+            logger.debug("get_option_ltps: skipping %s — missing angel_token", kite_sym)
+            continue
+
+        exchange_tokens.setdefault(exch, []).append(token)
+        token_to_kite[token] = kite_sym
+
+    if not exchange_tokens:
+        return {}
+
+    angel  = get_angel_session()
+    result = {}
+    try:
+        time.sleep(config.ANGEL_LTP_DELAY)
+        resp = angel.getMarketData("LTP", exchange_tokens)
+        if resp.get("status") and resp.get("data"):
+            for item in resp["data"].get("fetched", []):
+                token    = str(item.get("symbolToken", ""))
+                ltp      = item.get("ltp")
+                kite_sym = token_to_kite.get(token)
+                if kite_sym and ltp is not None:
+                    result[kite_sym] = float(ltp)
+                    logger.debug("getMarketData LTP: %s = %.2f", kite_sym, float(ltp))
+            for item in resp["data"].get("unfetched", []):
+                token    = str(item.get("symbolToken", ""))
+                kite_sym = token_to_kite.get(token, token)
+                logger.warning("getMarketData: could not fetch LTP for %s (token=%s)", kite_sym, token)
+        else:
+            logger.warning("getMarketData LTP failed: %s", resp.get("message", "unknown error"))
+    except Exception as exc:
+        logger.warning("getMarketData LTP exception: %s", exc)
+
+    return result
+
+
 # ── Search helper (kept for manual token lookup / debugging) ───────────────────
 
 def search_token(symbol: str, exchange: str) -> None:

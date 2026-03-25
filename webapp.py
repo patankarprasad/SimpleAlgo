@@ -33,6 +33,8 @@ import config
 import strategy_config as stcfg
 import trade_log as tlog
 import web_state
+import paper_trading
+from angel_data import get_option_ltps
 from kite_login import get_kite_session
 from order_manager import square_off_all
 from state import load_state, save_state, set_position, get_position
@@ -644,6 +646,8 @@ def positions():
         msg_banner = '<p style="color:var(--red-l);margin-bottom:12px">&#9888; Square-off failed — check log.</p>'
     elif msg == "cleared":
         msg_banner = '<p style="color:var(--green-l);margin-bottom:12px">&#10003; Position state cleared.</p>'
+    elif msg == "paper_cleared":
+        msg_banner = '<p style="color:var(--green-l);margin-bottom:12px">&#10003; Paper positions cleared.</p>'
 
     buttons_html = ""
     if algo_positions:
@@ -686,27 +690,70 @@ def positions():
     paper_positions = snap.get("paper_positions", {})
     paper_section   = ""
     if paper_positions:
+        # Batch-fetch live option LTPs for synthetic positions via Angel getLtpData
+        # (Kite's ltp() for options requires a higher API tier — Angel has no such restriction)
+        live_option_ltps: dict[str, float] = {}
+        angel_opt_list = []
+        for pp in paper_positions.values():
+            if pp.get("is_synthetic"):
+                angel_opt_list.append({
+                    "kite_tradingsymbol": pp["ce_symbol"],
+                    "angel_token":        pp.get("ce_angel_token", ""),
+                    "angel_symbol":       pp.get("ce_angel_symbol", ""),
+                    "angel_exchange":     "NFO",
+                })
+                angel_opt_list.append({
+                    "kite_tradingsymbol": pp["pe_symbol"],
+                    "angel_token":        pp.get("pe_angel_token", ""),
+                    "angel_symbol":       pp.get("pe_angel_symbol", ""),
+                    "angel_exchange":     "NFO",
+                })
+        if angel_opt_list:
+            try:
+                live_option_ltps = get_option_ltps(angel_opt_list)
+            except Exception as _ltp_exc:
+                logger.warning("Could not fetch live option LTPs for paper positions: %s", _ltp_exc)
+
         paper_rows = ""
         paper_total_pnl = 0.0
         for pname, pp in paper_positions.items():
-            cur_price  = idata.get(pname, {}).get("close")
-            psize      = pp["position_size"]
-            dir_html   = '<span class="pill pl-buy">LONG</span>' if psize > 0 else '<span class="pill pl-sell">SHORT</span>'
-            if cur_price:
-                upnl    = (float(cur_price) - pp["entry_price"]) * psize
-                paper_total_pnl += upnl
-                pnl_cls = "pnl-pos" if upnl >= 0 else "pnl-neg"
-                sign    = "+" if upnl >= 0 else ""
-                pnl_td  = f'<span class="{pnl_cls}">{sign}{_fmt(upnl)}</span> <span style="font-size:.68rem;color:var(--muted)">unreal.</span>'
+            cur_price = idata.get(pname, {}).get("close")
+            psize     = pp["position_size"]
+            dir_html  = '<span class="pill pl-buy">LONG</span>' if psize > 0 else '<span class="pill pl-sell">SHORT</span>'
+
+            if pp.get("is_synthetic"):
+                ce_ltp   = live_option_ltps.get(pp["ce_symbol"])
+                pe_ltp   = live_option_ltps.get(pp["pe_symbol"])
+                sym_disp = f'{pp["ce_symbol"]} / {pp["pe_symbol"]}'
+                if ce_ltp is not None and pe_ltp is not None:
+                    upnl    = psize * ((ce_ltp - pp["entry_ce_price"]) - (pe_ltp - pp["entry_pe_price"]))
+                    paper_total_pnl += upnl
+                    pnl_cls = "pnl-pos" if upnl >= 0 else "pnl-neg"
+                    sign    = "+" if upnl >= 0 else ""
+                    pnl_td  = (f'<span class="{pnl_cls}">{sign}{_fmt(upnl)}</span>'
+                               f' <span style="font-size:.68rem;color:var(--muted)">live opts</span>')
+                else:
+                    pnl_td  = '<span style="color:var(--muted);font-size:.78rem">LTP unavail.</span>'
+                last_td = f'{_fmt(ce_ltp)} / {_fmt(pe_ltp)}' if ce_ltp is not None else "-"
             else:
-                pnl_td  = "-"
+                sym_disp = pp["symbol"]
+                if cur_price:
+                    upnl    = (float(cur_price) - pp["entry_price"]) * psize
+                    paper_total_pnl += upnl
+                    pnl_cls = "pnl-pos" if upnl >= 0 else "pnl-neg"
+                    sign    = "+" if upnl >= 0 else ""
+                    pnl_td  = f'<span class="{pnl_cls}">{sign}{_fmt(upnl)}</span> <span style="font-size:.68rem;color:var(--muted)">unreal.</span>'
+                else:
+                    pnl_td  = "-"
+                last_td = _fmt(cur_price)
+
             paper_rows += f"""<tr>
   <td><strong>{pname}</strong></td>
-  <td style="color:var(--muted);font-size:.78rem">{pp["symbol"]}</td>
+  <td style="color:var(--muted);font-size:.78rem">{sym_disp}</td>
   <td>{dir_html}</td>
   <td style="text-align:right">{pp["qty"]}</td>
   <td style="text-align:right">{_fmt(pp["entry_price"])}</td>
-  <td style="text-align:right">{_fmt(cur_price)}</td>
+  <td style="text-align:right">{last_td}</td>
   <td style="text-align:right">{pnl_td}</td>
   <td style="color:var(--muted);font-size:.72rem">{pp["entry_time"]}</td>
 </tr>"""
@@ -720,6 +767,12 @@ def positions():
     <span class="{ptotal_cls}">{ptotal_sign}{_fmt(paper_total_pnl)}</span>
   </span>
 </h2>
+<div class="btn-bar" style="margin-bottom:10px">
+  <form method="post" action="/positions/paper/clear" style="margin:0"
+        onsubmit="return confirm('Clear all open paper positions? (No real orders placed)')">
+    <button type="submit" class="btn-sm btn-warn-sm">&#128465; Clear Paper State</button>
+  </form>
+</div>
 <div class="tbl-wrap">
   <table>
     <thead><tr>
@@ -771,6 +824,15 @@ def positions_clear():
     save_state({})
     logger.info("Web UI: position state cleared")
     return redirect("/positions?msg=cleared")
+
+
+@app.route("/positions/paper/clear", methods=["POST"])
+@login_required
+def positions_paper_clear():
+    """Wipe all persisted paper positions (no real orders placed)."""
+    paper_trading.clear_all()
+    logger.info("Web UI: paper position state cleared")
+    return redirect("/positions?msg=paper_cleared")
 
 
 # ── Trades (/trades) ──────────────────────────────────────────────────────────

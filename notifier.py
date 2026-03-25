@@ -217,3 +217,28 @@ def notify_paper_close(result: dict) -> None:
         f"<i>Paper trade — no real order placed on Kite.</i>"
     )
     logger.info("Telegram: paper trade close (%s P&L=%.2f)", result["name"], pnl)
+
+
+# ── Synthetic futures alerts ───────────────────────────────────────────────────
+
+def notify_synthetic_partial_fill(
+    name: str,
+    completed_leg: str,
+    failed_leg: str,
+    exc_msg: str,
+) -> None:
+    """
+    Critical alert when one leg of a synthetic order placement fails.
+    The completed leg is left open on Kite — human intervention is required
+    to close it manually before the algo resumes trading this instrument.
+    """
+    _send(
+        f"🚨 <b>PARTIAL SYNTHETIC FILL — {name}</b>\n\n"
+        f"Leg placed:  <code>{completed_leg}</code>\n"
+        f"Leg FAILED:  <code>{failed_leg}</code>\n"
+        f"Error: {exc_msg}\n\n"
+        f"⛔ Position state NOT updated — algo will retry on next signal.\n\n"
+        f"<b>ACTION REQUIRED:</b> Close the open leg <code>{completed_leg}</code> "
+        f"manually on Kite before the next signal fires."
+    )
+    logger.critical("Telegram: synthetic partial fill alert sent for %s", name)
