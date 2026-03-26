@@ -111,6 +111,10 @@ def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
         columns=["datetime", "open", "high", "low", "close", "volume"],
     )
     df["datetime"] = pd.to_datetime(df["datetime"])
+    # Angel may return ISO timestamps with a +05:30 offset (tz-aware).
+    # Normalise to tz-naive IST so all downstream comparisons work uniformly.
+    if df["datetime"].dt.tz is not None:
+        df["datetime"] = df["datetime"].dt.tz_convert("Asia/Kolkata").dt.tz_localize(None)
     df = df.set_index("datetime").sort_index()
     df = df.astype({c: float for c in ["open", "high", "low", "close", "volume"]})
 
