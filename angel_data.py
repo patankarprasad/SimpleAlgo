@@ -17,7 +17,7 @@ from datetime import datetime, timedelta
 import pandas as pd
 
 import config
-from angel_login import get_angel_session
+from angel_login import force_relogin, get_angel_session
 
 logger = logging.getLogger(__name__)
 
@@ -87,10 +87,19 @@ def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
     # Respect Angel's rate limit between consecutive historical data calls
     time.sleep(config.ANGEL_BASE_DELAY)
     resp = angel.getCandleData(params)
-    if resp["status"] is False or not resp.get("data"):
-        raise RuntimeError(
-            f"Angel getCandleData failed for {instrument['name']}: {resp.get('message')}"
+    if "status" not in resp or resp.get("status") is False or not resp.get("data"):
+        logger.warning(
+            "Angel getCandleData bad response for %s (attempt 1): %s",
+            instrument["name"], resp,
         )
+        logger.info("Angel: forcing re-login and retrying getCandleData ...")
+        angel = force_relogin()
+        time.sleep(config.ANGEL_BASE_DELAY)
+        resp = angel.getCandleData(params)
+        if "status" not in resp or resp.get("status") is False or not resp.get("data"):
+            raise RuntimeError(
+                f"Angel getCandleData failed for {instrument['name']} after re-login: {resp}"
+            )
 
     df = pd.DataFrame(
         resp["data"],

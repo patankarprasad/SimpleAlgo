@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 # ── In-memory singleton (cleared on session expiry) ───────────────────────────
 _ANGEL_SESSION: SmartConnect | None = None
+_session_date:  date         | None = None
 _session_lock  = threading.Lock()
 
 # ── Retry settings ────────────────────────────────────────────────────────────
@@ -59,38 +60,53 @@ def get_angel_session() -> SmartConnect:
     Return a live, authenticated SmartConnect object.
 
     Priority:
-      1. In-memory singleton (same process, already logged in)
+      1. In-memory singleton (same process, already logged in, same trading day)
       2. Today's file cache   (process restart, same trading day)
       3. Fresh TOTP login     (new day, stale/invalid cache)
 
     Double-checked locking: fast path avoids the lock on every candle fetch;
     the lock is only held during the one-time cache restore / login.
+    Session is automatically invalidated when the calendar date changes so that
+    an overnight-running process re-logins at the start of the next trading day.
     """
-    global _ANGEL_SESSION
+    global _ANGEL_SESSION, _session_date
 
-    # ── 1. Fast path (no lock) ─────────────────────────────────────────────────
-    if _ANGEL_SESSION is not None:
+    # ── 1. Fast path (no lock) — valid only if session is from today ───────────
+    if _ANGEL_SESSION is not None and _session_date == date.today():
         return _ANGEL_SESSION
 
     # ── 2 & 3. Slow path — acquire lock, re-check, then restore/login ─────────
     with _session_lock:
-        if _ANGEL_SESSION is not None:   # another thread may have set it
+        if _ANGEL_SESSION is not None and _session_date == date.today():
             return _ANGEL_SESSION
+
+        # Session exists but is from a previous day — clear it
+        if _ANGEL_SESSION is not None and _session_date != date.today():
+            logger.info(
+                "Angel: session is from %s, today is %s — forcing re-login",
+                _session_date, date.today(),
+            )
+            _ANGEL_SESSION = None
+            _session_date  = None
+            Path(config.ANGEL_TOKEN_FILE).unlink(missing_ok=True)
 
         session = _restore_from_cache()
         if session is not None:
             _ANGEL_SESSION = session
+            _session_date  = date.today()
             return _ANGEL_SESSION
 
         _ANGEL_SESSION = _login_with_retry()
+        _session_date  = date.today()
         return _ANGEL_SESSION
 
 
 def force_relogin() -> SmartConnect:
     """Discard the current session and force a fresh login on next call."""
-    global _ANGEL_SESSION
+    global _ANGEL_SESSION, _session_date
     with _session_lock:
         _ANGEL_SESSION = None
+        _session_date  = None
         Path(config.ANGEL_TOKEN_FILE).unlink(missing_ok=True)
     logger.info("Angel: session cleared, will re-login on next call")
     return get_angel_session()
@@ -218,7 +234,8 @@ def _write_cache(raw_jwt: str, refresh_token: str, feed_token: str, user_id: str
 
 def _on_session_expire():
     """Angel JWT expired mid-session – clear everything so next call re-logs in."""
-    global _ANGEL_SESSION
+    global _ANGEL_SESSION, _session_date
     logger.warning("Angel: session expired – clearing singleton + cache")
     _ANGEL_SESSION = None
+    _session_date  = None
     Path(config.ANGEL_TOKEN_FILE).unlink(missing_ok=True)

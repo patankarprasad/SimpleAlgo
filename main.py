@@ -585,10 +585,7 @@ if __name__ == "__main__":
     from waitress import serve
     from webapp import app
     port = config.KITE_AUTH_PORT
-    logger.info("Web server starting on http://0.0.0.0:%d", port)
-    logger.info("  Dashboard : http://localhost:%d/", port)
-    logger.info("  Kite login: http://localhost:%d/kite/login", port)
-    logger.info("  Redirect URL for Kite app: http://<VPS-IP>:%d/callback", port)
+    logger.info("Web server starting on port %d", port)
     try:
         serve(app, host="0.0.0.0", port=port, threads=4)
     except (KeyboardInterrupt, SystemExit):
