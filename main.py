@@ -254,6 +254,13 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                         name, exchange, price, strike_step, expiry_date
                     )
                     ce_ltp, pe_ltp = _fetch_option_ltps_safe(ce_info, pe_info)
+                    if ce_ltp == 0.0 or pe_ltp == 0.0:
+                        logger.warning(
+                            "%s: [PAPER] SYNTHETIC BUY skipped — could not fetch option LTPs "
+                            "(CE=%.2f PE=%.2f). P&L would be unreliable.",
+                            name, ce_ltp, pe_ltp,
+                        )
+                        raise RuntimeError(f"Option LTPs unavailable for {name} synthetic BUY")
                     paper_trading.open_position(
                         name, "BUY", ce_info["kite_tradingsymbol"], pnl_qty, price,
                         ce_symbol=ce_info["kite_tradingsymbol"],
@@ -289,6 +296,13 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                         name, exchange, price, strike_step, expiry_date
                     )
                     ce_ltp, pe_ltp = _fetch_option_ltps_safe(ce_info, pe_info)
+                    if ce_ltp == 0.0 or pe_ltp == 0.0:
+                        logger.warning(
+                            "%s: [PAPER] SYNTHETIC SELL skipped — could not fetch option LTPs "
+                            "(CE=%.2f PE=%.2f). P&L would be unreliable.",
+                            name, ce_ltp, pe_ltp,
+                        )
+                        raise RuntimeError(f"Option LTPs unavailable for {name} synthetic SELL")
                     paper_trading.open_position(
                         name, "SELL", pe_info["kite_tradingsymbol"], pnl_qty, price,
                         ce_symbol=ce_info["kite_tradingsymbol"],

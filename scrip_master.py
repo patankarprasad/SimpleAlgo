@@ -230,17 +230,37 @@ def _is_fresh() -> bool:
 
 
 def _download_angel():
-    r = requests.get(_ANGEL_URL, timeout=60)
-    r.raise_for_status()
-    _ANGEL_CACHE.write_text(r.text, encoding="utf-8")
-    logger.info("Angel master saved (%d bytes)", len(r.content))
+    try:
+        r = requests.get(_ANGEL_URL, timeout=60)
+        r.raise_for_status()
+        _ANGEL_CACHE.write_text(r.text, encoding="utf-8")
+        logger.info("Angel master saved (%d bytes)", len(r.content))
+    except Exception as exc:
+        if _ANGEL_CACHE.exists():
+            logger.warning(
+                "Angel master download failed (%s) — using stale cache from disk.", exc
+            )
+        else:
+            raise RuntimeError(
+                f"Angel master download failed and no cache exists: {exc}"
+            ) from exc
 
 
 def _download_kite():
-    r = requests.get(_KITE_URL, timeout=60)
-    r.raise_for_status()
-    _KITE_CACHE.write_text(r.text, encoding="utf-8")
-    logger.info("Kite instruments saved (%d bytes)", len(r.content))
+    try:
+        r = requests.get(_KITE_URL, timeout=60)
+        r.raise_for_status()
+        _KITE_CACHE.write_text(r.text, encoding="utf-8")
+        logger.info("Kite instruments saved (%d bytes)", len(r.content))
+    except Exception as exc:
+        if _KITE_CACHE.exists():
+            logger.warning(
+                "Kite instruments download failed (%s) — using stale cache from disk.", exc
+            )
+        else:
+            raise RuntimeError(
+                f"Kite instruments download failed and no cache exists: {exc}"
+            ) from exc
 
 
 def _get_merged() -> pd.DataFrame:

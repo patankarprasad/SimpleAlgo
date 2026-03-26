@@ -26,8 +26,13 @@ TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
 SERVER_BASE_URL    = os.getenv("SERVER_BASE_URL",    "")  # e.g. http://1.2.3.4:8880
 
 # ── Web dashboard credentials ──────────────────────────────────────────────────
-WEB_USERNAME = os.getenv("WEB_USERNAME", "admin")
-WEB_PASSWORD = os.getenv("WEB_PASSWORD", "changeme")
+WEB_USERNAME = os.getenv("WEB_USERNAME", "")
+WEB_PASSWORD = os.getenv("WEB_PASSWORD", "")
+if not WEB_USERNAME or not WEB_PASSWORD:
+    raise RuntimeError(
+        "WEB_USERNAME and WEB_PASSWORD must be set in your .env file. "
+        "The web dashboard will not start without them."
+    )
 
 # ── Kite Auth Web Server ───────────────────────────────────────────────────────
 KITE_AUTH_PORT       = int(os.getenv("KITE_AUTH_PORT", "8080"))   # port to listen on

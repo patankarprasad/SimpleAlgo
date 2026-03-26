@@ -117,8 +117,19 @@ def _fetch_option_ltps(
     """Fetch live last-traded prices for the two synthetic legs from Kite."""
     ce_key = f"{exchange}:{ce_symbol}"
     pe_key = f"{exchange}:{pe_symbol}"
-    ltps   = kite.ltp([ce_key, pe_key])
-    return ltps[ce_key]["last_price"], ltps[pe_key]["last_price"]
+    try:
+        ltps = kite.ltp([ce_key, pe_key])
+    except Exception as exc:
+        logger.warning("kite.ltp() failed for %s / %s: %s", ce_symbol, pe_symbol, exc)
+        return 0.0, 0.0
+    ce_ltp = ltps.get(ce_key, {}).get("last_price", 0.0)
+    pe_ltp = ltps.get(pe_key, {}).get("last_price", 0.0)
+    if ce_ltp == 0.0 or pe_ltp == 0.0:
+        logger.warning(
+            "LTP missing from Kite response for %s (%.2f) / %s (%.2f)",
+            ce_symbol, ce_ltp, pe_symbol, pe_ltp,
+        )
+    return ce_ltp, pe_ltp
 
 
 def place_synthetic_buy(

@@ -24,6 +24,7 @@ import logging
 from datetime import date, datetime
 from functools import wraps
 from pathlib import Path
+from urllib.parse import urlparse
 
 import pytz
 from flask import Flask, jsonify, redirect, request, session, url_for
@@ -311,8 +312,10 @@ def auth_login():
         if _check_credentials(username, password):
             session["logged_in"] = True
             next_url = request.args.get("next") or "/"
-            # Prevent open redirect: only allow relative paths
-            if not next_url.startswith("/"):
+            # Prevent open redirect: only allow relative paths with no netloc
+            # (catches both http://evil.com and //evil.com variants)
+            parsed = urlparse(next_url)
+            if parsed.netloc or not next_url.startswith("/"):
                 next_url = "/"
             return redirect(next_url)
         error = "Incorrect username or password."

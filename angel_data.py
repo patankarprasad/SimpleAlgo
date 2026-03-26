@@ -100,6 +100,13 @@ def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
     df = df.set_index("datetime").sort_index()
     df = df.astype({c: float for c in ["open", "high", "low", "close", "volume"]})
 
+    nan_cols = [c for c in ["open", "high", "low", "close"] if df[c].isna().any()]
+    if nan_cols:
+        logger.warning(
+            "NaN values in OHLCV data for %s (columns: %s) — data may be corrupted",
+            instrument["name"], nan_cols,
+        )
+
     df = df.tail(n_candles)
     logger.info("Fetched %d candles for %s", len(df), instrument["name"])
     return df

@@ -33,21 +33,20 @@ IST        = pytz.timezone("Asia/Kolkata")
 def _save() -> None:
     """
     Atomically persist the current _positions snapshot to disk.
-    Safe to call from any thread — acquires the lock itself to snapshot,
-    then writes outside the lock so I/O doesn't block readers.
+    Holds the lock for the entire snapshot + write so two concurrent
+    callers cannot interleave writes to the same .tmp file.
     """
-    with _lock:
-        snapshot = {k: dict(v) for k, v in _positions.items()}
-
     target = config.PAPER_STATE_FILE
     tmp    = target + ".tmp"
-    try:
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(snapshot, f, indent=2)
-        os.replace(tmp, target)
-        logger.debug("Paper positions saved (%d open)", len(snapshot))
-    except Exception as exc:
-        logger.warning("Failed to save paper positions: %s", exc)
+    with _lock:
+        snapshot = {k: dict(v) for k, v in _positions.items()}
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(snapshot, f, indent=2)
+            os.replace(tmp, target)
+            logger.debug("Paper positions saved (%d open)", len(snapshot))
+        except Exception as exc:
+            logger.warning("Failed to save paper positions: %s", exc)
 
 
 def load() -> None:

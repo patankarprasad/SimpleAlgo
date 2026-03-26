@@ -17,6 +17,8 @@ def rma(series: pd.Series, period: int) -> pd.Series:
     Wilder's Smoothing / RMA – equivalent to Pine ta.rma().
     alpha = 1/period, seed with simple average of first `period` values.
     """
+    if period <= 0:
+        raise ValueError(f"rma() period must be > 0, got {period}")
     result = np.full(len(series), np.nan)
     values = series.values.astype(float)
     for i in range(len(values)):

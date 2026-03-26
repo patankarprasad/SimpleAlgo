@@ -48,8 +48,8 @@ def set_position(
     is_synthetic: bool = False,
     ce_tradingsymbol: str = "",
     pe_tradingsymbol: str = "",
-    entry_ce_price: float = 0.0,
-    entry_pe_price: float = 0.0,
+    entry_ce_price: float | None = None,
+    entry_pe_price: float | None = None,
 ) -> None:
     """
     Persist position state for one instrument.
@@ -69,8 +69,8 @@ def set_position(
         "is_synthetic":       is_synthetic       or existing.get("is_synthetic", False),
         "ce_tradingsymbol":   ce_tradingsymbol   or existing.get("ce_tradingsymbol", ""),
         "pe_tradingsymbol":   pe_tradingsymbol   or existing.get("pe_tradingsymbol", ""),
-        "entry_ce_price":     entry_ce_price     or existing.get("entry_ce_price", 0.0),
-        "entry_pe_price":     entry_pe_price     or existing.get("entry_pe_price", 0.0),
+        "entry_ce_price":     entry_ce_price if entry_ce_price is not None else existing.get("entry_ce_price", 0.0),
+        "entry_pe_price":     entry_pe_price if entry_pe_price is not None else existing.get("entry_pe_price", 0.0),
     }
     save_state(state)
     logger.info("State updated: %s -> position_size=%d", instrument_name, position_size)
