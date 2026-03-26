@@ -232,7 +232,9 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         )
         return
 
-    # 2. Compute indicators; use iloc[-2] = last CLOSED candle
+    # 2. Compute indicators; use iloc[-1] = last CLOSED candle
+    # get_candles() already strips any forming candle, so iloc[-1] is always
+    # the most recent fully-closed bar regardless of Angel API behaviour.
     df_sig = compute_signals(
         df,
         st1_period = config.ST1_PERIOD,
@@ -242,14 +244,19 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         ma_length  = config.MA_LENGTH,
     )
 
-    last        = df_sig.iloc[-2]
+    last        = df_sig.iloc[-1]
     signal      = last["signal"]
     close_price = last["close"]
     pos         = get_position(state, name)
 
+    # candle_ts is the OPEN time of the bar (Angel convention).
+    # Close time = candle_ts + interval (e.g. 17:00 candle closes at 17:15).
+    candle_ts = df_sig.index[-1]
+
     logger.info(
-        "%s | kite=%-20s | close=%.2f  st1=%.2f  st2=%.2f  ma=%.2f | signal=%-12s pos=%d",
+        "%s | kite=%-20s | candle=%s | close=%.2f  st1=%.2f  st2=%.2f  ma=%.2f | signal=%-12s pos=%d",
         name, instrument["kite_tradingsymbol"],
+        candle_ts.strftime("%Y-%m-%d %H:%M"),
         close_price, last["st1"], last["st2"], last["ma"], signal, pos,
     )
 

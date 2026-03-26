@@ -54,8 +54,13 @@ def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
         angel_exchange – exchange (MCX / NFO)
         name           – instrument name (for logging)
 
-    Returns a DataFrame indexed by datetime with columns:
+    Returns a DataFrame indexed by datetime (candle OPEN time) with columns:
         open, high, low, close, volume
+
+    Only fully-closed candles are returned. Angel sometimes includes the
+    currently-forming candle (e.g. at 17:30:01 it may return a partial 17:30
+    candle). We strip any row whose open timestamp falls within the current
+    candle interval so callers can always safely use ``df.iloc[-1]``.
     """
     n_candles = n_candles or config.CANDLE_LOOKBACK
     interval  = INTERVAL_MAP.get(config.CANDLE_INTERVAL, config.CANDLE_INTERVAL)
@@ -116,12 +121,31 @@ def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
             instrument["name"], nan_cols,
         )
 
+    # ── Strip the forming (incomplete) candle ─────────────────────────────────
+    # Angel timestamps candles by their OPEN time. At e.g. 17:30:01 the API may
+    # return a partial 17:30 candle (only 1 s of data). We drop any row whose
+    # open-time falls inside the currently-forming interval so that callers can
+    # always treat df.iloc[-1] as the last fully-closed candle.
+    current_candle_open = pd.Timestamp(_floor_to_interval(datetime.now(), minutes_per_bar))
+    if not df.empty and df.index[-1] >= current_candle_open:
+        logger.debug(
+            "%s: dropping forming candle (open=%s, current interval started %s)",
+            instrument["name"],
+            df.index[-1].strftime("%H:%M"),
+            current_candle_open.strftime("%H:%M"),
+        )
+        df = df[df.index < current_candle_open]
+
     df = df.tail(n_candles)
-    logger.info("Fetched %d candles for %s", len(df), instrument["name"])
+    logger.info(
+        "Fetched %d candles for %s | latest closed candle: %s",
+        len(df), instrument["name"],
+        df.index[-1].strftime("%Y-%m-%d %H:%M") if not df.empty else "N/A",
+    )
     return df
 
 
-# ── Interval helper ────────────────────────────────────────────────────────────
+# ── Interval helpers ───────────────────────────────────────────────────────────
 
 def _interval_minutes(interval: str) -> int:
     return {
@@ -134,6 +158,25 @@ def _interval_minutes(interval: str) -> int:
         "ONE_HOUR":       60,
         "ONE_DAY":        1440,
     }.get(interval, 15)
+
+
+def _floor_to_interval(dt: datetime, interval_minutes: int) -> datetime:
+    """
+    Floor a naive datetime to the nearest lower interval boundary.
+
+    Examples (15-min interval):
+        17:30:01  →  17:30:00
+        17:15:01  →  17:15:00
+        17:29:59  →  17:15:00
+    """
+    total_minutes = dt.hour * 60 + dt.minute
+    floored       = (total_minutes // interval_minutes) * interval_minutes
+    return dt.replace(
+        hour        = floored // 60,
+        minute      = floored % 60,
+        second      = 0,
+        microsecond = 0,
+    )
 
 
 # ── Live LTP fetcher for options (used by synthetic futures) ───────────────────
