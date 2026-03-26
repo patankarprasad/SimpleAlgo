@@ -18,7 +18,7 @@ Usage
 """
 import logging
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 import pytz
 
@@ -192,10 +192,44 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     name, instrument["trade_start"], instrument["trade_end"])
         return
 
+    # ── First-candle-close gate ────────────────────────────────────────────────
+    # The scheduler fires 1 s after each candle boundary. The very first candle
+    # of the session does not close until trade_start + one interval.
+    #   MCX opens 09:00 → first 15-min candle closes 09:15 → first calc 09:15 ✓
+    #   NSE opens 09:15 → first 15-min candle closes 09:30 → first calc 09:30
+    #     (without this guard NSE would incorrectly calculate at 09:15:01 while
+    #      the opening candle is still forming)
+    first_calc_time = (
+        datetime.combine(now_ist.date(), trade_start)
+        + timedelta(minutes=_candle_interval_minutes())
+    ).time()
+    if current_time < first_calc_time:
+        logger.info(
+            "%s: first candle not yet closed (market opens %s, first calc at %s) — skipping",
+            name, instrument["trade_start"], first_calc_time.strftime("%H:%M"),
+        )
+        return
+
     # 1. Fetch OHLCV candles from Angel using the resolved token
     df = get_candles(instrument)
     if len(df) < config.MA_LENGTH + 10:
         logger.warning("%s: not enough candles (%d). Skipping.", name, len(df))
+        return
+
+    # ── Market-open guard — latest candle must be from today (IST) ────────────
+    # Angel returns naive IST timestamps. On a market holiday or weekend the API
+    # continues to serve the last available session's candles (from yesterday or
+    # earlier). Comparing dates is the simplest, foolproof way to detect this:
+    # if the newest candle is not from today the exchange is closed — do nothing.
+    latest_candle_date = df.index[-1].date()   # naive IST datetime → IST date
+    if latest_candle_date != now_ist.date():
+        logger.info(
+            "%s: latest candle is from %s but today is %s "
+            "— market closed (holiday/weekend), skipping",
+            name,
+            df.index[-1].strftime("%Y-%m-%d"),
+            now_ist.strftime("%Y-%m-%d"),
+        )
         return
 
     # 2. Compute indicators; use iloc[-2] = last CLOSED candle
@@ -514,6 +548,32 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────
+
+# Minutes per bar for each Angel interval string (mirrors angel_data._interval_minutes)
+_INTERVAL_MINUTES: dict[str, int] = {
+    "ONE_MINUTE":     1,
+    "THREE_MINUTE":   3,
+    "FIVE_MINUTE":    5,
+    "TEN_MINUTE":     10,
+    "FIFTEEN_MINUTE": 15,
+    "THIRTY_MINUTE":  30,
+    "ONE_HOUR":       60,
+    "ONE_DAY":        1440,
+}
+
+# Short aliases used in .env → normalised Angel string
+_INTERVAL_ALIAS: dict[str, str] = {
+    "1minute": "ONE_MINUTE", "3minute": "THREE_MINUTE", "5minute": "FIVE_MINUTE",
+    "10minute": "TEN_MINUTE", "15minute": "FIFTEEN_MINUTE", "30minute": "THIRTY_MINUTE",
+    "60minute": "ONE_HOUR", "day": "ONE_DAY",
+}
+
+
+def _candle_interval_minutes() -> int:
+    """Return the configured candle interval in whole minutes."""
+    normalised = _INTERVAL_ALIAS.get(config.CANDLE_INTERVAL, config.CANDLE_INTERVAL)
+    return _INTERVAL_MINUTES.get(normalised, 15)
+
 
 def _candle_cron() -> dict:
     """APScheduler cron kwargs that fire 1s after each candle close."""
