@@ -44,7 +44,7 @@ INTERVAL_MAP = {
 }
 
 
-def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
+def get_candles(instrument: dict, n_candles: int = None, interval: str = None) -> pd.DataFrame:
     """
     Fetch the last `n_candles` OHLCV candles for an instrument.
 
@@ -53,6 +53,9 @@ def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
         angel_token    – token string from Angel scrip master
         angel_exchange – exchange (MCX / NFO)
         name           – instrument name (for logging)
+
+    `interval` overrides the candle timeframe for this call; falls back to the
+    instrument's own ``timeframe`` field.
 
     Returns a DataFrame indexed by datetime (candle OPEN time) with columns:
         open, high, low, close, volume
@@ -63,7 +66,8 @@ def get_candles(instrument: dict, n_candles: int = None) -> pd.DataFrame:
     candle interval so callers can always safely use ``df.iloc[-1]``.
     """
     n_candles = n_candles or config.CANDLE_LOOKBACK
-    interval  = INTERVAL_MAP.get(config.CANDLE_INTERVAL, config.CANDLE_INTERVAL)
+    raw_interval = interval or instrument["timeframe"]
+    interval  = INTERVAL_MAP.get(raw_interval, raw_interval)
 
     # Determine a from_date that is wide enough to contain n_candles bars,
     # accounting for weekends, holidays, and MCX evening gaps.

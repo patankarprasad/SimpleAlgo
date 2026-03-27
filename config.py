@@ -54,8 +54,7 @@ ST2_PERIOD   = 10
 ST2_FACTOR   = 3.0
 MA_LENGTH    = 50
 
-CANDLE_INTERVAL = os.getenv("CANDLE_INTERVAL", "FIFTEEN_MINUTE")
-CANDLE_LOOKBACK = int(os.getenv("CANDLE_LOOKBACK", 200))
+CANDLE_LOOKBACK = 200
 DRY_RUN         = os.getenv("DRY_RUN", "false").strip().lower() == "true"
 
 # ── Instruments ────────────────────────────────────────────────────────────────
@@ -72,6 +71,7 @@ DRY_RUN         = os.getenv("DRY_RUN", "false").strip().lower() == "true"
 #   product     – NRML for positional/overnight; MIS for intraday
 #   trade_start – IST HH:MM  when the algo may start entering trades
 #   trade_end   – IST HH:MM  after which open positions are squared off
+#   timeframe   – Angel interval string (e.g. FIFTEEN_MINUTE, ONE_HOUR)
 #
 # NFO (NIFTY / BANKNIFTY) : 09:15 – 15:30
 # MCX (GOLDM / CRUDEOIL)  : 09:00 – 23:30  (MCX evening session ends at 23:30)
@@ -85,6 +85,7 @@ INSTRUMENTS = [
         "product":       "NRML",
         "trade_start":   "09:00",
         "trade_end":     "23:30",
+        "timeframe":     "FIFTEEN_MINUTE",
     },
     {
         "name":          "CRUDEOIL",
@@ -94,6 +95,17 @@ INSTRUMENTS = [
         "product":       "NRML",
         "trade_start":   "09:00",
         "trade_end":     "23:30",
+        "timeframe":     "FIFTEEN_MINUTE",
+    },
+    {
+        "name":          "SILVERM",
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 5,         # 5 kg/lot — PnL multiplier only (Kite order qty stays 1)
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
+        "timeframe":     "FIFTEEN_MINUTE",
     },
     {
         "name":        "NIFTY",
@@ -104,6 +116,7 @@ INSTRUMENTS = [
         "trade_end":   "15:30",
         "mode":        "SYNTHETIC", # trade as synthetic future (ATM CE + PE options)
         "strike_step": 50,          # NIFTY strikes are multiples of 50
+        "timeframe":   "FIFTEEN_MINUTE",
     },
     {
         "name":        "BANKNIFTY",
@@ -114,6 +127,72 @@ INSTRUMENTS = [
         "trade_end":   "15:30",
         "mode":        "SYNTHETIC", # trade as synthetic future (ATM CE + PE options)
         "strike_step": 100,         # BANKNIFTY strikes are multiples of 100
+        "timeframe":   "FIFTEEN_MINUTE",
+    },
+]
+
+HOURLY_INSTRUMENTS = [
+    {
+        "name":          "GOLDM_H",
+        "underlying":    "GOLDM",       # inherits resolved tokens from base instrument
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 10,
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
+        "timeframe":     "ONE_HOUR",
+        "long_only":     True,
+    },
+    {
+        "name":          "CRUDEOIL_H",
+        "underlying":    "CRUDEOIL",
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 100,
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
+        "timeframe":     "ONE_HOUR",
+        "long_only":     True,
+    },
+    {
+        "name":          "SILVERM_H",
+        "underlying":    "SILVERM",
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 5,
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
+        "timeframe":     "ONE_HOUR",
+        "long_only":     True,
+    },
+    {
+        "name":          "NIFTY_H",
+        "underlying":    "NIFTY",
+        "exchange":      "NFO",
+        "qty":           1,
+        "product":       "NRML",
+        "trade_start":   "09:15",
+        "trade_end":     "15:30",
+        "mode":          "SYNTHETIC",
+        "strike_step":   50,
+        "timeframe":     "ONE_HOUR",
+        "long_only":     True,
+    },
+    {
+        "name":          "BANKNIFTY_H",
+        "underlying":    "BANKNIFTY",
+        "exchange":      "NFO",
+        "qty":           1,
+        "product":       "NRML",
+        "trade_start":   "09:15",
+        "trade_end":     "15:30",
+        "mode":          "SYNTHETIC",
+        "strike_step":   100,
+        "timeframe":     "ONE_HOUR",
+        "long_only":     True,
     },
 ]
 

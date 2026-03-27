@@ -383,19 +383,20 @@ def dashboard():
     else:
         sched_badge = '<span class="badge b-neutral">&#9632; Scheduler stopped</span>'
 
+    hourly_names   = [i["name"] for i in config.HOURLY_INSTRUMENTS]
+    hourly_enabled = stcfg.get_all(hourly_names)
+
     # Instrument cards — show all configured instruments, even before first candle
     instruments = snap["instruments"]
-    if instruments:
-        cards = "".join(
-            _make_card(name, instruments.get(name, {}), state, enabled_map.get(name, True))
-            for name in inst_names
-        )
-    else:
-        # No data yet — still render toggle-only cards
-        cards = "".join(
-            _make_card(name, {}, state, enabled_map.get(name, True))
-            for name in inst_names
-        )
+    cards = "".join(
+        _make_card(name, instruments.get(name, {}), state, enabled_map.get(name, True))
+        for name in inst_names
+    )
+    hourly_cards = "".join(
+        _make_card(name, instruments.get(name, {}), state,
+                   hourly_enabled.get(name, True), timeframe_label="1H")
+        for name in hourly_names
+    )
 
     body = f"""
 <div class="content">
@@ -404,7 +405,10 @@ def dashboard():
     {sched_badge}
     <span class="badge b-neutral" id="clk"></span>
   </div>
+  <h2>15-Minute Strategies</h2>
   <div class="grid">{cards}</div>
+  <h2 style="margin-top:24px">Hourly Strategies (1H)</h2>
+  <div class="grid">{hourly_cards}</div>
 </div>
 <script>
 (function(){{
@@ -420,7 +424,8 @@ def dashboard():
     return _layout("Dashboard", body, active="dashboard", refresh=30)
 
 
-def _make_card(name: str, data: dict, state: dict, enabled: bool) -> str:
+def _make_card(name: str, data: dict, state: dict, enabled: bool,
+               timeframe_label: str = "") -> str:
     pos_size    = state.get(name, {}).get("position_size", 0)
     entry_price = state.get(name, {}).get("entry_price", 0.0)
     signal      = str(data.get("signal", ""))
@@ -487,13 +492,19 @@ def _make_card(name: str, data: dict, state: dict, enabled: bool) -> str:
     # Dim only the card body (not the toggle) so the button stays clickable
     body_style = ' style="opacity:.45;pointer-events:none"' if not enabled else ""
 
+    tf_badge = (
+        f'<span style="font-size:.62rem;color:var(--muted);background:#1e2030;'
+        f'padding:1px 6px;border-radius:5px;margin-top:3px;display:inline-block">'
+        f'{timeframe_label}</span>'
+    ) if timeframe_label else ""
+
     return f"""
 <div class="card">
   <div{body_style}>
     <div class="card-header">
       <div>
         <div class="card-name">{name}</div>
-        <div class="card-sym">{data.get("kite_tradingsymbol","")}</div>
+        <div class="card-sym">{data.get("kite_tradingsymbol","")}&nbsp;{tf_badge}</div>
       </div>
       {_pos_badge(pos_size)}
     </div>
