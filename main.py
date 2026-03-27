@@ -57,6 +57,7 @@ IST    = pytz.timezone("Asia/Kolkata")
 
 # ── Globals ────────────────────────────────────────────────────────────────────
 RESOLVED_INSTRUMENTS: list[dict] = []
+RESOLVED_HOURLY_INSTRUMENTS: list[dict] = []
 DRY_RUN: bool = False
 
 
@@ -67,9 +68,10 @@ def initialise():
     Run once at startup:
     - Refresh scrip masters (downloads if not yet cached today).
     - Resolve each config instrument → fills in live tokens and symbols.
+    - Build hourly instrument variants by inheriting tokens from base instruments.
     - Log the active contracts so you can verify expiry dates.
     """
-    global RESOLVED_INSTRUMENTS
+    global RESOLVED_INSTRUMENTS, RESOLVED_HOURLY_INSTRUMENTS
 
     logger.info("Refreshing scrip masters ...")
     scrip_master.refresh_masters()
@@ -94,7 +96,27 @@ def initialise():
     if not RESOLVED_INSTRUMENTS:
         raise RuntimeError("No instruments could be resolved. Check scrip masters.")
 
-    web_state.set_resolved_instruments(RESOLVED_INSTRUMENTS)
+    # Build hourly variants by inheriting resolved tokens/symbols from base instruments.
+    # No additional scrip-master lookup needed — same contract, different candle interval.
+    RESOLVED_HOURLY_INSTRUMENTS = []
+    for h_def in config.HOURLY_INSTRUMENTS:
+        underlying = h_def["underlying"]
+        base = next((i for i in RESOLVED_INSTRUMENTS if i["name"] == underlying), None)
+        if base is None:
+            logger.error(
+                "Hourly instrument %s: base instrument %s not resolved — skipping",
+                h_def["name"], underlying,
+            )
+            continue
+        resolved = {**base, **h_def}   # inherit tokens; h_def overrides name/timeframe/etc.
+        RESOLVED_HOURLY_INSTRUMENTS.append(resolved)
+        logger.info(
+            "  %-12s | 1H variant of %-10s | kite=%-22s | expiry=%s",
+            resolved["name"], underlying,
+            resolved["kite_tradingsymbol"], resolved["expiry"],
+        )
+
+    web_state.set_resolved_instruments(RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS)
 
 
 # ── Contract rollover check ────────────────────────────────────────────────────
@@ -179,6 +201,9 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
     trade_start  = _parse_time(instrument["trade_start"])
     trade_end    = _parse_time(instrument["trade_end"])
     current_time = now_ist.time()
+    timeframe    = instrument["timeframe"]
+    long_only    = instrument.get("long_only", False)
+    interval_min = _candle_interval_minutes(timeframe)
 
     if not strategy_config.is_enabled(name):
         logger.info("%s: strategy disabled — skipping", name)
@@ -201,7 +226,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
     #      the opening candle is still forming)
     first_calc_time = (
         datetime.combine(now_ist.date(), trade_start)
-        + timedelta(minutes=_candle_interval_minutes())
+        + timedelta(minutes=interval_min)
     ).time()
     if current_time < first_calc_time:
         logger.info(
@@ -211,7 +236,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         return
 
     # 1. Fetch OHLCV candles from Angel using the resolved token
-    df = get_candles(instrument)
+    df = get_candles(instrument, interval=timeframe)
     if len(df) < config.MA_LENGTH + 10:
         logger.warning("%s: not enough candles (%d). Skipping.", name, len(df))
         return
@@ -263,7 +288,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
     # 3. Push latest snapshot to the web dashboard
     web_state.update_instrument(name, {
         "kite_tradingsymbol": instrument["kite_tradingsymbol"],
-        "interval":           config.CANDLE_INTERVAL,
+        "interval":           timeframe,
         "close":  float(close_price),
         "st1":    float(last["st1"]),
         "st2":    float(last["st2"]),
@@ -331,7 +356,9 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 logger.info("%s: [PAPER] BUY at %.2f qty=%d", name, price, order_qty)
 
         elif signal == "SELL" and paper_size == 0:
-            if is_synthetic:
+            if long_only:
+                logger.info("%s: [PAPER] SELL signal ignored (long-only strategy)", name)
+            elif is_synthetic:
                 try:
                     ce_info, pe_info = scrip_master.get_atm_options(
                         name, exchange, price, strike_step, expiry_date
@@ -469,7 +496,9 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             set_position(state, name, instrument["qty"], close_price, sym, exchange)
 
     elif signal == "SELL" and pos == 0:
-        if is_synthetic:
+        if long_only:
+            logger.info("%s: SELL signal ignored (long-only strategy)", name)
+        elif is_synthetic:
             try:
                 ce_info, pe_info = scrip_master.get_atm_options(
                     name, exchange, price, strike_step, expiry_date
@@ -554,6 +583,29 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         logger.info("%s: no action (signal=%s, pos=%d)", name, signal, pos)
 
 
+def run_hourly_strategy():
+    """Called at every hourly candle close (HH:00:05 IST). Processes 1H instruments."""
+    web_state.record_run()
+
+    now_ist = datetime.now(IST)
+    logger.info("=" * 64)
+    logger.info("Hourly strategy run at %s IST", now_ist.strftime("%Y-%m-%d %H:%M:%S"))
+
+    kite = None
+    try:
+        kite = get_kite_session()
+    except RuntimeError as exc:
+        logger.warning("Kite session unavailable (%s) — signal calc continues, orders disabled", exc)
+
+    state = load_state()
+
+    for instrument in RESOLVED_HOURLY_INSTRUMENTS:
+        try:
+            _process_instrument(kite, state, instrument, now_ist)
+        except Exception as exc:
+            logger.error("Error processing %s: %s", instrument["name"], exc, exc_info=True)
+
+
 # ── Scheduler ─────────────────────────────────────────────────────────────────
 
 # Minutes per bar for each Angel interval string (mirrors angel_data._interval_minutes)
@@ -568,7 +620,7 @@ _INTERVAL_MINUTES: dict[str, int] = {
     "ONE_DAY":        1440,
 }
 
-# Short aliases used in .env → normalised Angel string
+# Short aliases (Kite-style) → normalised Angel string
 _INTERVAL_ALIAS: dict[str, str] = {
     "1minute": "ONE_MINUTE", "3minute": "THREE_MINUTE", "5minute": "FIVE_MINUTE",
     "10minute": "TEN_MINUTE", "15minute": "FIFTEEN_MINUTE", "30minute": "THIRTY_MINUTE",
@@ -576,23 +628,14 @@ _INTERVAL_ALIAS: dict[str, str] = {
 }
 
 
-def _candle_interval_minutes() -> int:
-    """Return the configured candle interval in whole minutes."""
-    normalised = _INTERVAL_ALIAS.get(config.CANDLE_INTERVAL, config.CANDLE_INTERVAL)
+def _candle_interval_minutes(interval: str) -> int:
+    """Return the candle interval in whole minutes."""
+    normalised = _INTERVAL_ALIAS.get(interval, interval)
     return _INTERVAL_MINUTES.get(normalised, 15)
 
 
 def _candle_cron() -> dict:
-    """APScheduler cron kwargs that fire 1s after each candle close."""
-    interval = config.CANDLE_INTERVAL.upper()
-    if "ONE_MINUTE"   in interval: return dict(minute="*",          second=1)
-    if "THREE"        in interval: return dict(minute="*/3",        second=1)
-    if "FIVE"         in interval: return dict(minute="*/5",        second=1)
-    if "TEN"          in interval: return dict(minute="*/10",       second=1)
-    if "FIFTEEN"      in interval: return dict(minute="0,15,30,45", second=1)
-    if "THIRTY"       in interval: return dict(minute="0,30",       second=1)
-    if "ONE_HOUR"     in interval: return dict(minute=1, second=1)
-    if "ONE_DAY"      in interval: return dict(hour=15, minute=31)
+    """APScheduler cron kwargs that fire 1s after each 15-minute candle close."""
     return dict(minute="0,15,30,45", second=1)
 
 
@@ -629,6 +672,8 @@ if __name__ == "__main__":
     cron_kwargs = _candle_cron()
     scheduler   = BackgroundScheduler(timezone=IST)
     scheduler.add_job(run_strategy, CronTrigger(timezone=IST, **cron_kwargs))
+    scheduler.add_job(run_hourly_strategy, CronTrigger(timezone=IST, minute=0, second=5))
+    logger.info("Hourly scheduler added (fires at HH:00:05 IST)")
 
     # ── Daily Telegram notifications ───────────────────────────────────────────
     # 08:30 — login reminder with auth server link
@@ -644,7 +689,7 @@ if __name__ == "__main__":
 
     scheduler.start()
     web_state.set_scheduler_running(True)
-    logger.info("Scheduler started. Interval=%s  Cron=%s", config.CANDLE_INTERVAL, cron_kwargs)
+    logger.info("Scheduler started. Cron=%s", cron_kwargs)
 
     # Waitress (production WSGI server) runs in main thread — blocks until Ctrl+C.
     # Single process keeps the APScheduler thread and Flask in the same memory space

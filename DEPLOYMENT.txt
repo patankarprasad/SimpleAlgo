@@ -1,0 +1,288 @@
+================================================================================
+  SimpleAlgo - Linux VPS Deployment Guide (Oracle Cloud / Ubuntu)
+================================================================================
+
+Tested on: Oracle Cloud Free Tier, Ubuntu 22.04, Python 3.10+
+App port:  8880 (Kite auth / web dashboard)
+
+
+--------------------------------------------------------------------------------
+1. PROVISION THE VPS
+--------------------------------------------------------------------------------
+
+- Create an Oracle Cloud Compute instance (Ubuntu 22.04)
+- Note the public IP address (e.g. 80.225.243.37)
+- SSH into the instance:
+    ssh ubuntu@<YOUR_VPS_IP>
+
+
+--------------------------------------------------------------------------------
+2. SET TIMEZONE TO INDIA
+--------------------------------------------------------------------------------
+
+    sudo timedatectl set-timezone Asia/Kolkata
+    timedatectl    # verify: should show IST, +0530
+
+
+--------------------------------------------------------------------------------
+3. INSTALL SYSTEM DEPENDENCIES
+--------------------------------------------------------------------------------
+
+    sudo apt update && sudo apt upgrade -y
+    sudo apt install python3 python3-pip python3-venv git nginx certbot python3-certbot-nginx -y
+
+
+--------------------------------------------------------------------------------
+4. CLONE THE REPOSITORY
+--------------------------------------------------------------------------------
+
+    cd /opt
+    sudo git clone https://github.com/YOUR_USERNAME/SimpleAlgo.git
+    sudo chown -R ubuntu:ubuntu /opt/SimpleAlgo
+    cd /opt/SimpleAlgo
+
+
+--------------------------------------------------------------------------------
+5. SET UP PYTHON VIRTUAL ENVIRONMENT
+--------------------------------------------------------------------------------
+
+    python3 -m venv venv
+    source venv/bin/activate
+    pip install --upgrade pip
+    pip install -r requirements.txt
+
+
+--------------------------------------------------------------------------------
+6. CREATE THE .env FILE
+--------------------------------------------------------------------------------
+
+    cp .env.example .env
+    nano .env
+
+Fill in all values. IMPORTANT: Do NOT put inline comments (# ...) after values.
+systemd's EnvironmentFile does not support inline comments and will include
+the comment text as part of the value, causing startup failures.
+
+Example of CORRECT format:
+    KITE_AUTH_PORT=8880
+    ANGEL_API_KEY=your_actual_key
+    WEB_USERNAME=admin
+    WEB_PASSWORD=yourpassword
+
+Example of WRONG format (will break):
+    KITE_AUTH_PORT=8880    # port the auth server listens on   <-- BREAKS
+
+Required values in .env:
+    ANGEL_API_KEY=
+    ANGEL_USERNAME=
+    ANGEL_PIN=
+    ANGEL_TOTP_SECRET=
+    KITE_API_KEY=
+    KITE_API_SECRET=
+    KITE_USER_ID=
+    KITE_PASSWORD=
+    KITE_PIN=
+    KITE_AUTH_PORT=8880
+    KITE_AUTH_PIN=
+    KITE_AUTH_SECRET_KEY=
+    WEB_USERNAME=
+    WEB_PASSWORD=
+    DRY_RUN=false
+    SERVER_BASE_URL=https://trade.yourdomain.com
+    TELEGRAM_BOT_TOKEN=         (optional)
+    TELEGRAM_CHAT_ID=           (optional)
+
+
+--------------------------------------------------------------------------------
+7. OPEN FIREWALL PORTS (Oracle Cloud - THREE steps required)
+--------------------------------------------------------------------------------
+
+Oracle Cloud requires ALL THREE of the following steps. Missing any one will
+keep ports blocked even if the others are done.
+
+--- Step A: Oracle Console Security List ---
+Go to: Oracle Cloud Console
+  -> Networking -> Virtual Cloud Networks -> your VCN
+  -> Security Lists -> Default Security List
+  -> Add Ingress Rules:
+
+  Source CIDR: 0.0.0.0/0 | Protocol: TCP | Dest Port: 80
+  Source CIDR: 0.0.0.0/0 | Protocol: TCP | Dest Port: 443
+  Source CIDR: 0.0.0.0/0 | Protocol: TCP | Dest Port: 8880
+
+--- Step B: UFW (OS firewall) ---
+    sudo ufw allow 22/tcp
+    sudo ufw allow 80/tcp
+    sudo ufw allow 443/tcp
+    sudo ufw allow 8880/tcp
+    sudo ufw enable
+    sudo ufw reload
+    sudo ufw status
+
+--- Step C: iptables (Oracle's own firewall - easy to miss) ---
+    sudo iptables -I INPUT -p tcp --dport 22 -j ACCEPT
+    sudo iptables -I INPUT -p tcp --dport 80 -j ACCEPT
+    sudo iptables -I INPUT -p tcp --dport 443 -j ACCEPT
+    sudo iptables -I INPUT -p tcp --dport 8880 -j ACCEPT
+
+    # Make persistent across reboots:
+    sudo apt install iptables-persistent -y
+    sudo netfilter-persistent save
+
+
+--------------------------------------------------------------------------------
+8. SET UP SYSTEMD SERVICE
+--------------------------------------------------------------------------------
+
+    sudo nano /etc/systemd/system/simplealgo.service
+
+Paste the following (no inline comments on any line):
+
+    [Unit]
+    Description=SimpleAlgo Trading Bot
+    After=network.target
+
+    [Service]
+    Type=simple
+    User=ubuntu
+    WorkingDirectory=/opt/SimpleAlgo
+    ExecStart=/opt/SimpleAlgo/venv/bin/python main.py
+    Restart=on-failure
+    RestartSec=10
+    StandardOutput=journal
+    StandardError=journal
+    EnvironmentFile=/opt/SimpleAlgo/.env
+
+    [Install]
+    WantedBy=multi-user.target
+
+Enable and start:
+    sudo systemctl daemon-reload
+    sudo systemctl enable simplealgo
+    sudo systemctl start simplealgo
+    sudo systemctl status simplealgo
+
+View live logs:
+    sudo journalctl -u simplealgo -f
+
+
+--------------------------------------------------------------------------------
+9. CONFIGURE NGINX REVERSE PROXY
+--------------------------------------------------------------------------------
+
+    sudo nano /etc/nginx/sites-available/simplealgo
+
+Paste:
+
+    server {
+        listen 80;
+        server_name trade.yourdomain.com;
+
+        location / {
+            proxy_pass http://127.0.0.1:8880;
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+        }
+    }
+
+Enable the config:
+    sudo ln -s /etc/nginx/sites-available/simplealgo /etc/nginx/sites-enabled/
+    sudo nginx -t
+    sudo systemctl reload nginx
+
+
+--------------------------------------------------------------------------------
+10. ATTACH CUSTOM SUBDOMAIN (Cloudflare)
+--------------------------------------------------------------------------------
+
+1. Go to Cloudflare DNS dashboard for your domain
+2. Add an A record:
+     Type:    A
+     Name:    trade
+     Value:   <YOUR_VPS_IP>
+     Proxy:   GREY CLOUD (DNS only) during SSL setup, enable after
+
+IMPORTANT: Keep Cloudflare proxy OFF (grey cloud) during certbot SSL setup.
+Turn it back ON after the certificate is issued.
+
+
+--------------------------------------------------------------------------------
+11. ISSUE SSL CERTIFICATE (Let's Encrypt)
+--------------------------------------------------------------------------------
+
+Make sure:
+- DNS A record is pointing to your VPS IP
+- Cloudflare proxy is OFF (grey cloud)
+- Nginx is running and port 80 is accessible
+
+Run:
+    sudo certbot --nginx -d trade.yourdomain.com
+
+Certbot will automatically update your nginx config for HTTPS.
+
+After success, re-enable Cloudflare proxy (orange cloud) if desired.
+
+Auto-renewal is set up by certbot automatically. Verify:
+    sudo certbot renew --dry-run
+
+
+--------------------------------------------------------------------------------
+12. VERIFY EVERYTHING IS WORKING
+--------------------------------------------------------------------------------
+
+    sudo systemctl status simplealgo         # app running?
+    sudo systemctl status nginx              # nginx running?
+    curl http://localhost:8880/              # app reachable locally?
+    curl https://trade.yourdomain.com/       # accessible via domain?
+
+
+--------------------------------------------------------------------------------
+USEFUL COMMANDS (DAY-TO-DAY)
+--------------------------------------------------------------------------------
+
+    # View app logs (live)
+    sudo journalctl -u simplealgo -f
+
+    # View last 50 lines of logs
+    sudo journalctl -u simplealgo -n 50 --no-pager
+
+    # Restart app (e.g. after code update)
+    sudo systemctl restart simplealgo
+
+    # Pull latest code and restart
+    cd /opt/SimpleAlgo
+    git pull
+    source venv/bin/activate
+    pip install -r requirements.txt
+    sudo systemctl restart simplealgo
+
+    # Check open ports
+    sudo ufw status
+    sudo iptables -L INPUT -n | grep ACCEPT
+
+
+--------------------------------------------------------------------------------
+TROUBLESHOOTING
+--------------------------------------------------------------------------------
+
+Problem: systemd service fails with "Failed to load environment files"
+Fix:     Check .env file path is /opt/SimpleAlgo/.env (case-sensitive)
+
+Problem: systemd service fails with status=217/USER
+Fix:     Inline comments in service file — remove all # comments from value lines
+
+Problem: ValueError: invalid literal for int() on port value
+Fix:     Inline comments in .env file — remove all # comments from value lines
+
+Problem: Certbot fails with error 523
+Fix:     Turn OFF Cloudflare proxy (grey cloud) before running certbot
+
+Problem: Port 8880 not accessible from internet on Oracle Cloud
+Fix:     All three firewall steps required — Console Security List + UFW + iptables
+
+Problem: App crashes on startup (check logs with journalctl)
+Fix:     sudo journalctl -u simplealgo -n 50 --no-pager
+
+================================================================================
