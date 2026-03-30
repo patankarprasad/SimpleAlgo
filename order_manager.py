@@ -490,8 +490,17 @@ def square_off_all(kite: KiteConnect, resolved_instruments: list, state: dict):
     """Emergency / EOD square-off of every tracked open position."""
     from state import get_position
     for instrument in resolved_instruments:
-        pos = get_position(state, instrument["name"])
+        name = instrument["name"]
+        pos  = get_position(state, name)
         if pos > 0:
             close_long(kite, instrument)
         elif pos < 0:
-            close_short(kite, instrument)
+            saved = state.get(name, {})
+            if saved.get("is_short_ce"):
+                ce_sym = saved.get("ce_tradingsymbol", "")
+                if ce_sym:
+                    close_short_ce(kite, instrument, ce_sym)
+                else:
+                    logger.warning("square_off_all: %s is_short_ce but no ce_tradingsymbol in state", name)
+            else:
+                close_short(kite, instrument)

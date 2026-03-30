@@ -70,9 +70,11 @@ def set_position(
         # Preserve from existing if not re-supplied (e.g. on exit calls)
         "kite_tradingsymbol": kite_tradingsymbol or existing.get("kite_tradingsymbol", ""),
         "exchange":           exchange           or existing.get("exchange", ""),
-        # Synthetic futures / short-CE leg data
-        "is_synthetic":       is_synthetic       or existing.get("is_synthetic", False),
-        "is_short_ce":        is_short_ce        or existing.get("is_short_ce", False),
+        # Synthetic futures / short-CE leg data.
+        # On exit (position_size=0) clear the type flags so stale values from the
+        # previous trade don't bleed into the next entry via the `or existing` fallback.
+        "is_synthetic":       is_synthetic       if position_size != 0 else False,
+        "is_short_ce":        is_short_ce        if position_size != 0 else False,
         "ce_tradingsymbol":   ce_tradingsymbol   or existing.get("ce_tradingsymbol", ""),
         "pe_tradingsymbol":   pe_tradingsymbol   or existing.get("pe_tradingsymbol", ""),
         "entry_ce_price":     entry_ce_price if entry_ce_price is not None else existing.get("entry_ce_price", 0.0),
