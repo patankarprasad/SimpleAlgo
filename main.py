@@ -155,7 +155,7 @@ def _check_rollover():
     risks trading the wrong contract. Human confirmation is required.
     """
     state = load_state()
-    for inst in RESOLVED_INSTRUMENTS:
+    for inst in RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS:
         name    = inst["name"]
         new_sym = inst["kite_tradingsymbol"]
         saved   = state.get(name, {})
