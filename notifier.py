@@ -142,6 +142,25 @@ def notify_rollover_warning(name: str, old_sym: str, new_sym: str, pos: int) -> 
     logger.critical("Telegram: rollover warning sent for %s", name)
 
 
+# ── Tender-period auto-rollover ────────────────────────────────────────────────
+
+def notify_tender_period_rollover(
+    name: str, old_sym: str, new_sym: str, new_expiry
+) -> None:
+    """
+    Alert sent when an order is automatically retried on the next month's
+    contract because the current contract entered the MCX tender period.
+    """
+    _send(
+        f"🔄 <b>Tender Period Auto-Rollover — {name}</b>\n\n"
+        f"Blocked contract: <code>{old_sym}</code> (entering tender period)\n"
+        f"New contract:     <code>{new_sym}</code> (expiry: {new_expiry})\n\n"
+        f"Order automatically retried on the new contract.\n"
+        f"All future signals for <b>{name}</b> will now use <code>{new_sym}</code>."
+    )
+    logger.warning("Telegram: tender period rollover notification sent for %s", name)
+
+
 # ── Trade notifications ────────────────────────────────────────────────────────
 
 _ICONS = {
