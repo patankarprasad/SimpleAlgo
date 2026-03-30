@@ -108,26 +108,30 @@ INSTRUMENTS = [
         "timeframe":     "FIFTEEN_MINUTE",
     },
     {
-        "name":        "NIFTY",
-        "exchange":    "NFO",
-        "qty":         1,           # lot_size resolved from scrip master
-        "product":     "NRML",
-        "trade_start": "09:15",
-        "trade_end":   "15:30",
-        "mode":        "SYNTHETIC", # trade as synthetic future (ATM CE + PE options)
-        "strike_step": 50,          # NIFTY strikes are multiples of 50
-        "timeframe":   "FIFTEEN_MINUTE",
+        "name":                  "NIFTY",
+        "exchange":              "NFO",
+        "qty":                   1,           # lot_size resolved from scrip master
+        "product":               "NRML",
+        "trade_start":           "09:15",
+        "trade_end":             "15:30",
+        "mode":                  "SYNTHETIC", # LONG: synthetic future (ATM CE + PE); SHORT: sell CE
+        "strike_step":           50,          # NIFTY strikes are multiples of 50
+        "timeframe":             "FIFTEEN_MINUTE",
+        "spot_index_name":       "Nifty 50",  # Angel symbol for NSE spot index (used for indicators)
+        "short_ce_target_premium": 300,       # SELL the monthly CE whose LTP is closest to this
     },
     {
-        "name":        "BANKNIFTY",
-        "exchange":    "NFO",
-        "qty":         1,           # lot_size resolved from scrip master
-        "product":     "NRML",
-        "trade_start": "09:15",
-        "trade_end":   "15:30",
-        "mode":        "SYNTHETIC", # trade as synthetic future (ATM CE + PE options)
-        "strike_step": 100,         # BANKNIFTY strikes are multiples of 100
-        "timeframe":   "FIFTEEN_MINUTE",
+        "name":                  "BANKNIFTY",
+        "exchange":              "NFO",
+        "qty":                   1,           # lot_size resolved from scrip master
+        "product":               "NRML",
+        "trade_start":           "09:15",
+        "trade_end":             "15:30",
+        "mode":                  "SYNTHETIC", # LONG: synthetic future (ATM CE + PE); SHORT: sell CE
+        "strike_step":           100,         # BANKNIFTY strikes are multiples of 100
+        "timeframe":             "FIFTEEN_MINUTE",
+        "spot_index_name":       "Nifty Bank", # Angel symbol for NSE spot index (used for indicators)
+        "short_ce_target_premium": 700,        # SELL the monthly CE whose LTP is closest to this
     },
 ]
 
@@ -169,30 +173,34 @@ HOURLY_INSTRUMENTS = [
         "long_only":     True,
     },
     {
-        "name":          "NIFTY_H",
-        "underlying":    "NIFTY",
-        "exchange":      "NFO",
-        "qty":           1,
-        "product":       "NRML",
-        "trade_start":   "09:15",
-        "trade_end":     "15:30",
-        "mode":          "SYNTHETIC",
-        "strike_step":   50,
-        "timeframe":     "ONE_HOUR",
-        "long_only":     True,
+        "name":                  "NIFTY_H",
+        "underlying":            "NIFTY",
+        "exchange":              "NFO",
+        "qty":                   1,
+        "product":               "NRML",
+        "trade_start":           "09:15",
+        "trade_end":             "15:30",
+        "mode":                  "SYNTHETIC",
+        "strike_step":           50,
+        "timeframe":             "ONE_HOUR",
+        "long_only":             True,
+        "spot_index_name":       "Nifty 50",
+        "short_ce_target_premium": 300,
     },
     {
-        "name":          "BANKNIFTY_H",
-        "underlying":    "BANKNIFTY",
-        "exchange":      "NFO",
-        "qty":           1,
-        "product":       "NRML",
-        "trade_start":   "09:15",
-        "trade_end":     "15:30",
-        "mode":          "SYNTHETIC",
-        "strike_step":   100,
-        "timeframe":     "ONE_HOUR",
-        "long_only":     True,
+        "name":                  "BANKNIFTY_H",
+        "underlying":            "BANKNIFTY",
+        "exchange":              "NFO",
+        "qty":                   1,
+        "product":               "NRML",
+        "trade_start":           "09:15",
+        "trade_end":             "15:30",
+        "mode":                  "SYNTHETIC",
+        "strike_step":           100,
+        "timeframe":             "ONE_HOUR",
+        "long_only":             True,
+        "spot_index_name":       "Nifty Bank",
+        "short_ce_target_premium": 700,
     },
 ]
 

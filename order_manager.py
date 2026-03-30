@@ -398,6 +398,94 @@ def close_synthetic_short(
     return ce_order_id, pe_order_id, exit_ce_ltp, exit_pe_ltp
 
 
+def place_short_ce(
+    kite: KiteConnect,
+    instrument: dict,
+    ce_info: dict,
+) -> tuple[str, float]:
+    """
+    Open a short by SELLING a single CE option (premium collection strategy).
+
+    Returns (order_id, entry_ltp).
+    Used for NIFTY/BANKNIFTY SHORT signals instead of a 2-leg synthetic short.
+    """
+    if kite is None:
+        raise RuntimeError(
+            f"Kite session unavailable — short CE SELL not placed for {instrument['name']}"
+        )
+    qty      = instrument["qty"] * instrument["lot_size"]
+    exchange = ce_info.get("exchange", "NFO")
+
+    order_id = kite.place_order(
+        variety          = kite.VARIETY_REGULAR,
+        exchange         = exchange,
+        tradingsymbol    = ce_info["kite_tradingsymbol"],
+        transaction_type = kite.TRANSACTION_TYPE_SELL,
+        quantity         = qty,
+        order_type       = kite.ORDER_TYPE_MARKET,
+        product          = instrument["product"],
+    )
+    logger.info(
+        "Short CE SELL placed | %s | symbol=%s | strike=%s | qty=%d | order_id=%s",
+        instrument["name"], ce_info["kite_tradingsymbol"],
+        ce_info.get("strike", "?"), qty, order_id,
+    )
+
+    # Fetch entry LTP immediately after order placement
+    ce_key = f"{exchange}:{ce_info['kite_tradingsymbol']}"
+    try:
+        ltps = kite.ltp([ce_key])
+        entry_ltp = ltps.get(ce_key, {}).get("last_price", 0.0)
+    except Exception as exc:
+        logger.warning("Could not fetch CE LTP after short CE SELL (%s): %s",
+                       ce_info["kite_tradingsymbol"], exc)
+        entry_ltp = 0.0
+
+    return order_id, entry_ltp
+
+
+def close_short_ce(
+    kite: KiteConnect,
+    instrument: dict,
+    ce_symbol: str,
+    exchange: str = "NFO",
+) -> tuple[str, float]:
+    """
+    Close a short CE position by BUYING back the CE.
+
+    Returns (order_id, exit_ltp).
+    """
+    if kite is None:
+        raise RuntimeError(
+            f"Kite session unavailable — short CE BUY-back not placed for {instrument['name']}"
+        )
+    qty = instrument["qty"] * instrument["lot_size"]
+
+    order_id = kite.place_order(
+        variety          = kite.VARIETY_REGULAR,
+        exchange         = exchange,
+        tradingsymbol    = ce_symbol,
+        transaction_type = kite.TRANSACTION_TYPE_BUY,
+        quantity         = qty,
+        order_type       = kite.ORDER_TYPE_MARKET,
+        product          = instrument["product"],
+    )
+    logger.info(
+        "Short CE BUY-back placed | %s | symbol=%s | qty=%d | order_id=%s",
+        instrument["name"], ce_symbol, qty, order_id,
+    )
+
+    ce_key = f"{exchange}:{ce_symbol}"
+    try:
+        ltps = kite.ltp([ce_key])
+        exit_ltp = ltps.get(ce_key, {}).get("last_price", 0.0)
+    except Exception as exc:
+        logger.warning("Could not fetch CE LTP after short CE BUY-back (%s): %s", ce_symbol, exc)
+        exit_ltp = 0.0
+
+    return order_id, exit_ltp
+
+
 def square_off_all(kite: KiteConnect, resolved_instruments: list, state: dict):
     """Emergency / EOD square-off of every tracked open position."""
     from state import get_position
