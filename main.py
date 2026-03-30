@@ -22,6 +22,11 @@ from datetime import datetime, timedelta
 
 import pytz
 
+try:
+    from kiteconnect.exceptions import InputException as KiteInputException
+except ImportError:
+    KiteInputException = None
+
 import config
 import notifier
 import paper_trading
@@ -144,6 +149,65 @@ def _check_rollover():
                 name, old_sym, new_sym,
             )
             notifier.notify_rollover_warning(name, old_sym, new_sym, pos)
+
+
+# ── Tender-period rollover helpers ────────────────────────────────────────────
+
+def _is_tender_period_error(exc) -> bool:
+    return "tender period" in str(exc).lower()
+
+
+def _roll_to_next_expiry(instrument: dict) -> dict:
+    """
+    Called when Kite rejects a new-entry order because the current MCX contract
+    is entering its tender period.
+
+    Finds the next-month contract, updates RESOLVED_INSTRUMENTS (and any
+    matching hourly variants) in-place so all future ticks use the new contract,
+    sends a Telegram alert, and returns the rolled instrument dict.
+    """
+    name           = instrument["name"]
+    exchange       = instrument["exchange"]
+    current_expiry = instrument.get("expiry")
+
+    all_fut = scrip_master.get_all_futures(name, exchange)
+    next_contract = next(
+        (f for f in all_fut if current_expiry is None or f["expiry"] > current_expiry),
+        None,
+    )
+    if next_contract is None:
+        raise RuntimeError(
+            f"No next-month contract found for {name} on {exchange} "
+            f"(current expiry={current_expiry})"
+        )
+
+    rolled = {**instrument, **next_contract}
+
+    # Update global lists so future candle-fetches and orders use the new contract
+    for i, inst in enumerate(RESOLVED_INSTRUMENTS):
+        if inst["name"] == name:
+            RESOLVED_INSTRUMENTS[i] = rolled
+            break
+    for i, inst in enumerate(RESOLVED_HOURLY_INSTRUMENTS):
+        if inst["name"] == name or inst.get("underlying") == name:
+            RESOLVED_HOURLY_INSTRUMENTS[i] = {**inst, **next_contract}
+            break
+
+    web_state.set_resolved_instruments(RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS)
+
+    logger.warning(
+        "TENDER PERIOD ROLLOVER: %s — %s (expiry=%s) → %s (expiry=%s)",
+        name,
+        instrument["kite_tradingsymbol"], current_expiry,
+        rolled["kite_tradingsymbol"], rolled["expiry"],
+    )
+    notifier.notify_tender_period_rollover(
+        name,
+        instrument["kite_tradingsymbol"],
+        rolled["kite_tradingsymbol"],
+        rolled["expiry"],
+    )
+    return rolled
 
 
 # ── Core strategy tick ─────────────────────────────────────────────────────────
@@ -490,7 +554,18 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     name, str(exc).split("CE placed")[-1][:60], "", str(exc)
                 )
         else:
-            place_buy(kite, instrument)
+            if KiteInputException:
+                try:
+                    place_buy(kite, instrument)
+                except KiteInputException as exc:
+                    if _is_tender_period_error(exc):
+                        instrument = _roll_to_next_expiry(instrument)
+                        sym = instrument["kite_tradingsymbol"]
+                        place_buy(kite, instrument)
+                    else:
+                        raise
+            else:
+                place_buy(kite, instrument)
             trade_log.log_trade(name, "BUY", sym, order_qty)
             notifier.notify_trade(name, "BUY", sym, order_qty, price)
             set_position(state, name, instrument["qty"], close_price, sym, exchange)
@@ -524,7 +599,18 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     name, str(exc).split("PE placed")[-1][:60], "", str(exc)
                 )
         else:
-            place_sell(kite, instrument)
+            if KiteInputException:
+                try:
+                    place_sell(kite, instrument)
+                except KiteInputException as exc:
+                    if _is_tender_period_error(exc):
+                        instrument = _roll_to_next_expiry(instrument)
+                        sym = instrument["kite_tradingsymbol"]
+                        place_sell(kite, instrument)
+                    else:
+                        raise
+            else:
+                place_sell(kite, instrument)
             trade_log.log_trade(name, "SELL", sym, order_qty)
             notifier.notify_trade(name, "SELL", sym, order_qty, price)
             set_position(state, name, -instrument["qty"], close_price, sym, exchange)
