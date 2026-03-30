@@ -669,13 +669,22 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         logger.info("%s: no action (signal=%s, pos=%d)", name, signal, pos)
 
 
-def run_hourly_strategy():
-    """Called at every hourly candle close (HH:00:05 IST). Processes 1H instruments."""
+def run_hourly_strategy(exchange_filter: str = None):
+    """
+    Called at every hourly candle close. Processes 1H instruments.
+
+    exchange_filter – if given (e.g. "MCX" or "NFO"), only instruments on that
+    exchange are processed.  Used to schedule MCX (HH:00:05) and NFO (HH:15:05)
+    separately because their hourly candles close at different minute offsets:
+      MCX opens 09:00 → candles close at :00 (10:00, 11:00 …)
+      NFO opens 09:15 → candles close at :15 (10:15, 11:15 …)
+    """
     web_state.record_run()
 
     now_ist = datetime.now(IST)
     logger.info("=" * 64)
-    logger.info("Hourly strategy run at %s IST", now_ist.strftime("%Y-%m-%d %H:%M:%S"))
+    logger.info("Hourly strategy run at %s IST (exchange_filter=%s)",
+                now_ist.strftime("%Y-%m-%d %H:%M:%S"), exchange_filter or "all")
 
     kite = None
     try:
@@ -685,7 +694,11 @@ def run_hourly_strategy():
 
     state = load_state()
 
-    for instrument in RESOLVED_HOURLY_INSTRUMENTS:
+    instruments = RESOLVED_HOURLY_INSTRUMENTS
+    if exchange_filter:
+        instruments = [i for i in instruments if i.get("exchange") == exchange_filter]
+
+    for instrument in instruments:
         try:
             _process_instrument(kite, state, instrument, now_ist)
         except Exception as exc:
@@ -758,8 +771,17 @@ if __name__ == "__main__":
     cron_kwargs = _candle_cron()
     scheduler   = BackgroundScheduler(timezone=IST)
     scheduler.add_job(run_strategy, CronTrigger(timezone=IST, **cron_kwargs))
-    scheduler.add_job(run_hourly_strategy, CronTrigger(timezone=IST, minute=0, second=5))
-    logger.info("Hourly scheduler added (fires at HH:00:05 IST)")
+    # MCX hourly candles close at HH:00 (exchange opens 09:00)
+    scheduler.add_job(
+        run_hourly_strategy, CronTrigger(timezone=IST, minute=0, second=5),
+        args=["MCX"],
+    )
+    # NFO hourly candles close at HH:15 (exchange opens 09:15)
+    scheduler.add_job(
+        run_hourly_strategy, CronTrigger(timezone=IST, minute=15, second=5),
+        args=["NFO"],
+    )
+    logger.info("Hourly schedulers added: MCX at HH:00:05, NFO at HH:15:05 IST")
 
     # ── Daily Telegram notifications ───────────────────────────────────────────
     # 08:30 — login reminder with auth server link
