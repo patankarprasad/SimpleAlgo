@@ -172,6 +172,89 @@ def get_atm_options(
     )
 
 
+def get_spot_index(symbol_name: str) -> dict:
+    """
+    Return angel_token and angel_exchange for a NSE spot index by symbol name.
+
+    Searches the Angel scrip master for a NSE instrument whose `symbol` field
+    contains `symbol_name` (case-insensitive).  Used to fetch SPOT price candles
+    for NIFTY/BANKNIFTY so that indicators are calculated on spot prices.
+
+    Example:
+        get_spot_index("Nifty 50")   # NIFTY spot
+        get_spot_index("Nifty Bank") # BANKNIFTY spot
+    """
+    angel_raw = json.loads(_ANGEL_CACHE.read_text(encoding="utf-8"))
+    df = pd.DataFrame(angel_raw)
+
+    # Restrict to NSE, then search symbol field (case-insensitive substring)
+    nse_df = df[df["exch_seg"] == "NSE"].copy()
+    search = symbol_name.upper()
+    matches = nse_df[nse_df["symbol"].str.upper().str.contains(search, regex=False, na=False)]
+
+    if matches.empty:
+        raise ValueError(
+            f"Spot index '{symbol_name}' not found in Angel master (NSE). "
+            "Check spot_index_name in config.py."
+        )
+
+    row = matches.iloc[0]
+    return {
+        "angel_token":    str(row["token"]),
+        "angel_exchange": str(row["exch_seg"]),
+        "angel_symbol":   str(row["symbol"]),
+    }
+
+
+def get_ce_options_for_expiry(
+    name: str,
+    exchange: str,
+    expiry_date,
+    around_price: float,
+    strike_step: int,
+    num_strikes: int = 25,
+) -> list[dict]:
+    """
+    Return CE option dicts for a monthly expiry within ±num_strikes of around_price.
+
+    Used to find the CE whose live LTP is closest to a target premium.
+    Each returned dict contains the fields required by get_option_ltps():
+        kite_tradingsymbol, angel_token, angel_symbol, angel_exchange
+    plus strike, lot_size, tick_size, kite_instrument_token.
+    """
+    df = _get_options()
+
+    atm_strike = int(around_price / strike_step + 0.5) * strike_step
+    min_strike  = atm_strike - num_strikes * strike_step
+    max_strike  = atm_strike + num_strikes * strike_step
+
+    mask = (
+        (df["name"].str.upper() == name.upper()) &
+        (df["expiry_date"] == expiry_date) &
+        (df["instrument_type"] == "CE") &
+        (df["strike"] >= min_strike) &
+        (df["strike"] <= max_strike)
+    )
+    subset = df[mask].sort_values("strike")
+
+    result = []
+    for _, row in subset.iterrows():
+        result.append({
+            "kite_tradingsymbol":    row["tradingsymbol"],
+            "kite_instrument_token": int(row["instrument_token"]),
+            "strike":                int(row["strike"]),
+            "expiry":                row["expiry_date"],
+            "lot_size":              int(row["lot_size"]),
+            "tick_size":             float(row["tick_size"]),
+            "option_type":           "CE",
+            "exchange":              exchange.upper(),
+            "angel_token":           str(row.get("angel_token", "")),
+            "angel_symbol":          str(row.get("angel_symbol", "")),
+            "angel_exchange":        str(row.get("angel_exchange", "NFO")),
+        })
+    return result
+
+
 def resolve_instrument(inst_def: dict) -> dict:
     """
     Enrich a bare instrument config dict with live scrip-master data.

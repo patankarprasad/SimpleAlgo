@@ -32,10 +32,12 @@ import web_state
 from angel_data import get_candles, get_option_ltps
 from indicators import compute_signals
 from kite_login import get_kite_session
+from kiteconnect.exceptions import InputException
 from order_manager import (
     place_buy, place_sell, close_long, close_short,
     place_synthetic_buy, place_synthetic_sell,
     close_synthetic_long, close_synthetic_short,
+    place_short_ce, close_short_ce,
 )
 from state import load_state, set_position, get_position
 
@@ -116,6 +118,28 @@ def initialise():
             resolved["kite_tradingsymbol"], resolved["expiry"],
         )
 
+    # Resolve spot index tokens for SYNTHETIC instruments (used for indicator candles)
+    all_resolved = RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS
+    for inst in all_resolved:
+        spot_name = inst.get("spot_index_name")
+        if inst.get("mode") == "SYNTHETIC" and spot_name:
+            try:
+                spot = scrip_master.get_spot_index(spot_name)
+                inst["spot_angel_token"]    = spot["angel_token"]
+                inst["spot_angel_exchange"] = spot["angel_exchange"]
+                inst["spot_angel_symbol"]   = spot["angel_symbol"]
+                logger.info(
+                    "  %-12s | spot index: %s (token=%s, exchange=%s)",
+                    inst["name"], spot["angel_symbol"],
+                    spot["angel_token"], spot["angel_exchange"],
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not resolve spot index '%s' for %s: %s — "
+                    "will use futures prices for indicators",
+                    spot_name, inst["name"], exc,
+                )
+
     web_state.set_resolved_instruments(RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS)
 
 
@@ -173,6 +197,31 @@ def run_strategy():
             logger.error("Error processing %s: %s", instrument["name"], exc, exc_info=True)
 
 
+def _is_tender_period_error(exc: Exception) -> bool:
+    return "tender period" in str(exc).lower()
+
+
+def _next_month_instrument(instrument: dict) -> dict:
+    """
+    Return an instrument dict updated to the second-nearest futures contract.
+    Used when the nearest contract is blocked due to entering tender period.
+    The caller is responsible for saving the new kite_tradingsymbol to state.
+    """
+    contracts = scrip_master.get_all_futures(instrument["name"], instrument["exchange"])
+    if len(contracts) < 2:
+        raise RuntimeError(
+            f"No next-month contract available for {instrument['name']} "
+            f"on {instrument['exchange']}"
+        )
+    next_contract = contracts[1]  # second nearest, sorted by expiry
+    logger.warning(
+        "%s: tender-period — switching from %s to next-month %s",
+        instrument["name"], instrument["kite_tradingsymbol"],
+        next_contract["kite_tradingsymbol"],
+    )
+    return {**instrument, **next_contract}
+
+
 def _fetch_option_ltps_safe(ce_opt: dict, pe_opt: dict) -> tuple[float, float]:
     """
     Fetch live LTPs for a CE/PE pair from Angel SmartAPI (getLtpData).
@@ -194,6 +243,77 @@ def _fetch_option_ltps_safe(ce_opt: dict, pe_opt: dict) -> tuple[float, float]:
             ce_opt.get("kite_tradingsymbol"), pe_opt.get("kite_tradingsymbol"), exc,
         )
         return 0.0, 0.0
+
+
+def _fetch_ce_ltp_safe(ce_opt: dict) -> float:
+    """Fetch live LTP for a single CE option via Angel. Returns 0.0 on failure."""
+    try:
+        results = get_option_ltps([ce_opt])
+        return results.get(ce_opt["kite_tradingsymbol"], 0.0)
+    except Exception as exc:
+        logger.warning("Failed to fetch CE LTP (%s): %s",
+                       ce_opt.get("kite_tradingsymbol"), exc)
+        return 0.0
+
+
+def _find_ce_for_short(
+    name: str, exchange: str, expiry_date, spot_price: float,
+    strike_step: int, target_premium: float,
+) -> tuple[dict, float]:
+    """
+    Find the monthly CE option whose live LTP is closest to target_premium.
+
+    Searches CE options within ±25 strikes of spot_price for the given expiry.
+    Returns (ce_info_dict, ltp).  Raises ValueError if no valid LTP is found.
+    """
+    ce_options = scrip_master.get_ce_options_for_expiry(
+        name, exchange, expiry_date, spot_price, strike_step
+    )
+    if not ce_options:
+        raise ValueError(f"No CE options found for {name} expiry={expiry_date}")
+
+    ltps = get_option_ltps(ce_options)
+
+    best_ce  = None
+    best_ltp = 0.0
+    best_diff = float("inf")
+    for ce in ce_options:
+        ltp = ltps.get(ce["kite_tradingsymbol"], 0.0)
+        if ltp <= 0:
+            continue
+        diff = abs(ltp - target_premium)
+        if diff < best_diff:
+            best_diff = diff
+            best_ce   = ce
+            best_ltp  = ltp
+
+    if best_ce is None:
+        raise ValueError(
+            f"Could not fetch any CE LTP for {name} — "
+            "check Angel tokens in options master"
+        )
+
+    logger.info(
+        "%s: selected CE for short | strike=%d | LTP=%.2f | target=%.2f | diff=%.2f",
+        name, best_ce["strike"], best_ltp, target_premium, best_diff,
+    )
+    return best_ce, best_ltp
+
+
+def _get_spot_instrument(instrument: dict) -> dict:
+    """
+    Return a modified instrument dict that uses the NSE spot index token
+    instead of the futures token, so that Angel candle calls return SPOT prices.
+    Only applies when the instrument has spot_angel_token resolved at startup.
+    """
+    if instrument.get("spot_angel_token"):
+        return {
+            **instrument,
+            "angel_token":    instrument["spot_angel_token"],
+            "angel_exchange": instrument["spot_angel_exchange"],
+            "angel_symbol":   instrument.get("spot_angel_symbol", ""),
+        }
+    return instrument
 
 
 def _process_instrument(kite, state: dict, instrument: dict, now_ist):
@@ -235,8 +355,11 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         )
         return
 
-    # 1. Fetch OHLCV candles from Angel using the resolved token
-    df = get_candles(instrument, interval=timeframe)
+    # 1. Fetch OHLCV candles from Angel.
+    # For NIFTY/BANKNIFTY (SYNTHETIC mode) use the NSE spot index so that
+    # indicators are calculated on SPOT prices, not futures prices.
+    data_instrument = _get_spot_instrument(instrument)
+    df = get_candles(data_instrument, interval=timeframe)
     if len(df) < config.MA_LENGTH + 10:
         logger.warning("%s: not enough candles (%d). Skipping.", name, len(df))
         return
@@ -359,40 +482,33 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             if long_only:
                 logger.info("%s: [PAPER] SELL signal ignored (long-only strategy)", name)
             elif is_synthetic:
+                # SHORT = SELL monthly CE with premium closest to target
                 try:
-                    ce_info, pe_info = scrip_master.get_atm_options(
-                        name, exchange, price, strike_step, expiry_date
+                    target_premium = instrument.get("short_ce_target_premium", 300)
+                    ce_info, ce_ltp = _find_ce_for_short(
+                        name, exchange, expiry_date, price, strike_step, target_premium
                     )
-                    ce_ltp, pe_ltp = _fetch_option_ltps_safe(ce_info, pe_info)
-                    if ce_ltp == 0.0 or pe_ltp == 0.0:
-                        logger.warning(
-                            "%s: [PAPER] SYNTHETIC SELL skipped — could not fetch option LTPs "
-                            "(CE=%.2f PE=%.2f). P&L would be unreliable.",
-                            name, ce_ltp, pe_ltp,
+                    if ce_ltp == 0.0:
+                        raise RuntimeError(
+                            f"CE LTP unavailable for {name} short CE — P&L would be unreliable"
                         )
-                        raise RuntimeError(f"Option LTPs unavailable for {name} synthetic SELL")
                     paper_trading.open_position(
-                        name, "SELL", pe_info["kite_tradingsymbol"], pnl_qty, price,
+                        name, "SELL", ce_info["kite_tradingsymbol"], pnl_qty, price,
                         ce_symbol=ce_info["kite_tradingsymbol"],
-                        pe_symbol=pe_info["kite_tradingsymbol"],
                         entry_ce_price=ce_ltp,
-                        entry_pe_price=pe_ltp,
                         ce_angel_token=ce_info["angel_token"],
                         ce_angel_symbol=ce_info["angel_symbol"],
-                        pe_angel_token=pe_info["angel_token"],
-                        pe_angel_symbol=pe_info["angel_symbol"],
+                        is_short_ce=True,
                     )
-                    leg_sym = f"{ce_info['kite_tradingsymbol']}+{pe_info['kite_tradingsymbol']}"
-                    trade_log.log_trade(name, "SELL_SYNTHETIC", leg_sym, order_qty, dry_run=True)
-                    notifier.notify_paper_open(name, "SELL", pe_info["kite_tradingsymbol"], order_qty, price)
+                    trade_log.log_trade(name, "SELL_CE", ce_info["kite_tradingsymbol"], order_qty, dry_run=True)
+                    notifier.notify_paper_open(name, "SELL", ce_info["kite_tradingsymbol"], order_qty, price)
                     logger.info(
-                        "%s: [PAPER] SYNTHETIC SELL | strike=%d | CE=%s (%.2f) | PE=%s (%.2f)",
-                        name, pe_info["strike"],
-                        ce_info["kite_tradingsymbol"], ce_ltp,
-                        pe_info["kite_tradingsymbol"], pe_ltp,
+                        "%s: [PAPER] SHORT CE | strike=%d | CE=%s (%.2f) | target=%.0f",
+                        name, ce_info["strike"],
+                        ce_info["kite_tradingsymbol"], ce_ltp, target_premium,
                     )
                 except Exception as exc:
-                    logger.error("%s: Failed to open synthetic paper SELL: %s", name, exc)
+                    logger.error("%s: Failed to open short CE paper SELL: %s", name, exc)
             else:
                 paper_trading.open_position(name, "SELL", sym, pnl_qty, price)
                 trade_log.log_trade(name, "SELL", sym, order_qty, dry_run=True)
@@ -422,7 +538,16 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         elif signal in ("EXIT_SHORT", "BUY") and paper_size < 0:
             if is_synthetic:
                 paper_pos = paper_trading.get_position(name)
-                if paper_pos and paper_pos.get("is_synthetic"):
+                if paper_pos and paper_pos.get("is_short_ce"):
+                    # Close short CE: fetch CE LTP for accurate P&L
+                    ce_opt = {"kite_tradingsymbol": paper_pos["ce_symbol"], "angel_token": paper_pos["ce_angel_token"], "angel_symbol": paper_pos["ce_angel_symbol"], "angel_exchange": "NFO"}
+                    ce_ltp = _fetch_ce_ltp_safe(ce_opt)
+                    result = paper_trading.close_position(
+                        name, price,
+                        exit_ce_price=ce_ltp if ce_ltp else None,
+                    )
+                elif paper_pos and paper_pos.get("is_synthetic"):
+                    # Close old 2-leg synthetic short (backward compat)
                     ce_opt = {"kite_tradingsymbol": paper_pos["ce_symbol"], "angel_token": paper_pos["ce_angel_token"], "angel_symbol": paper_pos["ce_angel_symbol"], "angel_exchange": "NFO"}
                     pe_opt = {"kite_tradingsymbol": paper_pos["pe_symbol"], "angel_token": paper_pos["pe_angel_token"], "angel_symbol": paper_pos["pe_angel_symbol"], "angel_exchange": "NFO"}
                     ce_ltp, pe_ltp = _fetch_option_ltps_safe(ce_opt, pe_opt)
@@ -442,7 +567,11 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         else:
             paper_pos = paper_trading.get_position(name)
             if paper_pos:
-                if is_synthetic and paper_pos.get("is_synthetic"):
+                if is_synthetic and paper_pos.get("is_short_ce"):
+                    ce_opt = {"kite_tradingsymbol": paper_pos["ce_symbol"], "angel_token": paper_pos["ce_angel_token"], "angel_symbol": paper_pos["ce_angel_symbol"], "angel_exchange": "NFO"}
+                    ce_ltp = _fetch_ce_ltp_safe(ce_opt)
+                    upnl = paper_trading.get_unrealized_pnl(name, price, ce_ltp=ce_ltp or None)
+                elif is_synthetic and paper_pos.get("is_synthetic"):
                     ce_opt = {"kite_tradingsymbol": paper_pos["ce_symbol"], "angel_token": paper_pos["ce_angel_token"], "angel_symbol": paper_pos["ce_angel_symbol"], "angel_exchange": "NFO"}
                     pe_opt = {"kite_tradingsymbol": paper_pos["pe_symbol"], "angel_token": paper_pos["pe_angel_token"], "angel_symbol": paper_pos["pe_angel_symbol"], "angel_exchange": "NFO"}
                     ce_ltp, pe_ltp = _fetch_option_ltps_safe(ce_opt, pe_opt)
@@ -490,44 +619,57 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     name, str(exc).split("CE placed")[-1][:60], "", str(exc)
                 )
         else:
-            place_buy(kite, instrument)
-            trade_log.log_trade(name, "BUY", sym, order_qty)
-            notifier.notify_trade(name, "BUY", sym, order_qty, price)
-            set_position(state, name, instrument["qty"], close_price, sym, exchange)
+            entry_sym, entry_exchange = sym, exchange
+            try:
+                place_buy(kite, instrument)
+            except InputException as exc:
+                if not _is_tender_period_error(exc):
+                    raise
+                next_inst = _next_month_instrument(instrument)
+                place_buy(kite, next_inst)
+                entry_sym      = next_inst["kite_tradingsymbol"]
+                entry_exchange = next_inst["exchange"]
+            trade_log.log_trade(name, "BUY", entry_sym, order_qty)
+            notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
+            set_position(state, name, instrument["qty"], close_price, entry_sym, entry_exchange)
 
     elif signal == "SELL" and pos == 0:
         if long_only:
             logger.info("%s: SELL signal ignored (long-only strategy)", name)
         elif is_synthetic:
+            # SHORT = SELL monthly CE with premium closest to target
             try:
-                ce_info, pe_info = scrip_master.get_atm_options(
-                    name, exchange, price, strike_step, expiry_date
+                target_premium = instrument.get("short_ce_target_premium", 300)
+                ce_info, ce_ltp = _find_ce_for_short(
+                    name, exchange, expiry_date, price, strike_step, target_premium
                 )
-                ce_oid, pe_oid, ce_ltp, pe_ltp = place_synthetic_sell(
-                    kite, instrument, ce_info, pe_info
-                )
-                leg_sym = f"{ce_info['kite_tradingsymbol']}+{pe_info['kite_tradingsymbol']}"
-                trade_log.log_trade(name, "SELL_SYNTHETIC", leg_sym, order_qty)
-                notifier.notify_trade(name, "SELL", pe_info["kite_tradingsymbol"], order_qty, price)
+                ce_oid, entry_ce_ltp = place_short_ce(kite, instrument, ce_info)
+                trade_log.log_trade(name, "SELL_CE", ce_info["kite_tradingsymbol"], order_qty)
+                notifier.notify_trade(name, "SELL", ce_info["kite_tradingsymbol"], order_qty, price)
                 set_position(
                     state, name, -instrument["qty"], close_price,
-                    pe_info["kite_tradingsymbol"], exchange,
-                    is_synthetic=True,
+                    ce_info["kite_tradingsymbol"], exchange,
+                    is_short_ce=True,
                     ce_tradingsymbol=ce_info["kite_tradingsymbol"],
-                    pe_tradingsymbol=pe_info["kite_tradingsymbol"],
-                    entry_ce_price=ce_ltp,
-                    entry_pe_price=pe_ltp,
+                    entry_ce_price=entry_ce_ltp or ce_ltp,
                 )
-            except RuntimeError as exc:
-                logger.error("%s: Synthetic SELL failed: %s", name, exc, exc_info=True)
-                notifier.notify_synthetic_partial_fill(
-                    name, str(exc).split("PE placed")[-1][:60], "", str(exc)
-                )
+            except Exception as exc:
+                logger.error("%s: Short CE SELL failed: %s", name, exc, exc_info=True)
+                notifier.notify_synthetic_partial_fill(name, "", "", str(exc))
         else:
-            place_sell(kite, instrument)
-            trade_log.log_trade(name, "SELL", sym, order_qty)
-            notifier.notify_trade(name, "SELL", sym, order_qty, price)
-            set_position(state, name, -instrument["qty"], close_price, sym, exchange)
+            entry_sym, entry_exchange = sym, exchange
+            try:
+                place_sell(kite, instrument)
+            except InputException as exc:
+                if not _is_tender_period_error(exc):
+                    raise
+                next_inst = _next_month_instrument(instrument)
+                place_sell(kite, next_inst)
+                entry_sym      = next_inst["kite_tradingsymbol"]
+                entry_exchange = next_inst["exchange"]
+            trade_log.log_trade(name, "SELL", entry_sym, order_qty)
+            notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
+            set_position(state, name, -instrument["qty"], close_price, entry_sym, entry_exchange)
 
     # A strong SELL signal (all three bearish) while long is still an exit.
     # np.select returns "SELL" before "EXIT_LONG" when sell_cond is True,
@@ -550,9 +692,14 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 logger.error("%s: Synthetic EXIT LONG failed: %s", name, exc, exc_info=True)
                 notifier.notify_synthetic_partial_fill(name, ce_sym, pe_sym, str(exc))
         else:
-            close_long(kite, instrument)
-            trade_log.log_trade(name, "EXIT_LONG", sym, order_qty)
-            notifier.notify_trade(name, "EXIT_LONG", sym, order_qty, price)
+            # Use symbol stored in state at entry time — may differ from resolved
+            # instrument if a tender-period next-month switch occurred at entry
+            exit_sym = state.get(name, {}).get("kite_tradingsymbol") or sym
+            if exit_sym != sym:
+                logger.info("%s: EXIT LONG using state symbol %s (resolved=%s)", name, exit_sym, sym)
+            close_long(kite, {**instrument, "kite_tradingsymbol": exit_sym})
+            trade_log.log_trade(name, "EXIT_LONG", exit_sym, order_qty)
+            notifier.notify_trade(name, "EXIT_LONG", exit_sym, order_qty, price)
             set_position(state, name, 0)
 
     # Symmetric: strong BUY while short is still an exit.
@@ -560,23 +707,41 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         if signal == "BUY":
             logger.warning("%s: BUY fired while short — treating as EXIT_SHORT", name)
         if is_synthetic:
-            saved   = state.get(name, {})
-            ce_sym  = saved.get("ce_tradingsymbol", "")
-            pe_sym  = saved.get("pe_tradingsymbol", "")
-            try:
-                ce_oid, pe_oid, exit_ce_ltp, exit_pe_ltp = close_synthetic_short(
-                    kite, instrument, ce_sym, pe_sym
-                )
-                trade_log.log_trade(name, "EXIT_SHORT", f"{ce_sym}+{pe_sym}", order_qty)
-                notifier.notify_trade(name, "EXIT_SHORT", pe_sym, order_qty, price)
-                set_position(state, name, 0)
-            except RuntimeError as exc:
-                logger.error("%s: Synthetic EXIT SHORT failed: %s", name, exc, exc_info=True)
-                notifier.notify_synthetic_partial_fill(name, pe_sym, ce_sym, str(exc))
+            saved = state.get(name, {})
+            if saved.get("is_short_ce"):
+                # Close short CE: buy back the sold call
+                ce_sym = saved.get("ce_tradingsymbol", "")
+                try:
+                    ce_oid, exit_ce_ltp = close_short_ce(kite, instrument, ce_sym)
+                    trade_log.log_trade(name, "EXIT_SHORT_CE", ce_sym, order_qty)
+                    notifier.notify_trade(name, "EXIT_SHORT", ce_sym, order_qty, price)
+                    set_position(state, name, 0)
+                except RuntimeError as exc:
+                    logger.error("%s: Short CE BUY-back failed: %s", name, exc, exc_info=True)
+                    notifier.notify_synthetic_partial_fill(name, ce_sym, "", str(exc))
+            else:
+                # Backward compat: close old 2-leg synthetic short
+                ce_sym = saved.get("ce_tradingsymbol", "")
+                pe_sym = saved.get("pe_tradingsymbol", "")
+                try:
+                    ce_oid, pe_oid, exit_ce_ltp, exit_pe_ltp = close_synthetic_short(
+                        kite, instrument, ce_sym, pe_sym
+                    )
+                    trade_log.log_trade(name, "EXIT_SHORT", f"{ce_sym}+{pe_sym}", order_qty)
+                    notifier.notify_trade(name, "EXIT_SHORT", pe_sym, order_qty, price)
+                    set_position(state, name, 0)
+                except RuntimeError as exc:
+                    logger.error("%s: Synthetic EXIT SHORT failed: %s", name, exc, exc_info=True)
+                    notifier.notify_synthetic_partial_fill(name, pe_sym, ce_sym, str(exc))
         else:
-            close_short(kite, instrument)
-            trade_log.log_trade(name, "EXIT_SHORT", sym, order_qty)
-            notifier.notify_trade(name, "EXIT_SHORT", sym, order_qty, price)
+            # Use symbol stored in state at entry time — may differ from resolved
+            # instrument if a tender-period next-month switch occurred at entry
+            exit_sym = state.get(name, {}).get("kite_tradingsymbol") or sym
+            if exit_sym != sym:
+                logger.info("%s: EXIT SHORT using state symbol %s (resolved=%s)", name, exit_sym, sym)
+            close_short(kite, {**instrument, "kite_tradingsymbol": exit_sym})
+            trade_log.log_trade(name, "EXIT_SHORT", exit_sym, order_qty)
+            notifier.notify_trade(name, "EXIT_SHORT", exit_sym, order_qty, price)
             set_position(state, name, 0)
 
     else:

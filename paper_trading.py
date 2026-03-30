@@ -85,12 +85,14 @@ def open_position(
     ce_angel_symbol: str = "",
     pe_angel_token: str = "",
     pe_angel_symbol: str = "",
+    is_short_ce: bool = False,
 ) -> None:
     """
     Record a paper trade entry.
     action: "BUY" (long) or "SELL" (short)
 
-    For synthetic futures (NIFTY/BANKNIFTY) pass the keyword-only CE/PE fields.
+    For synthetic futures (NIFTY/BANKNIFTY LONG) pass the keyword-only CE/PE fields.
+    For short CE (NIFTY/BANKNIFTY SHORT) pass is_short_ce=True and ce_symbol/entry_ce_price.
     All keyword args default to empty/zero so existing callers are unaffected.
     """
     size = qty if action == "BUY" else -qty
@@ -102,8 +104,10 @@ def open_position(
             "entry_time":      datetime.now(IST).strftime("%H:%M:%S"),
             "symbol":          symbol,
             "qty":             qty,
-            # synthetic leg fields (empty/zero for plain futures):
+            # synthetic future (2-leg) fields:
             "is_synthetic":    bool(ce_symbol and pe_symbol),
+            # single-leg short CE flag:
+            "is_short_ce":     is_short_ce,
             "ce_symbol":       ce_symbol,
             "pe_symbol":       pe_symbol,
             "entry_ce_price":  entry_ce_price,
@@ -139,7 +143,10 @@ def close_position(
 
     _save()   # persist the removal immediately
 
-    if (pos.get("is_synthetic")
+    if pos.get("is_short_ce") and exit_ce_price is not None:
+        # Single-leg CE short: P&L = premium received − premium paid to close
+        pnl = (pos["entry_ce_price"] - exit_ce_price) * pos["qty"]
+    elif (pos.get("is_synthetic")
             and exit_ce_price is not None
             and exit_pe_price is not None):
         pnl = pos["position_size"] * (
@@ -191,6 +198,9 @@ def get_unrealized_pnl(
         pos = _positions.get(name)
     if pos is None:
         return None
+    if pos.get("is_short_ce") and ce_ltp is not None:
+        # Single-leg CE short: unrealized P&L = entry premium − current premium
+        return (pos["entry_ce_price"] - ce_ltp) * pos["qty"]
     if pos.get("is_synthetic") and ce_ltp is not None and pe_ltp is not None:
         return pos["position_size"] * (
             (ce_ltp - pos["entry_ce_price"]) -

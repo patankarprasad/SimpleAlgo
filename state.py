@@ -46,6 +46,7 @@ def set_position(
     exchange: str = "",
     *,
     is_synthetic: bool = False,
+    is_short_ce: bool = False,
     ce_tradingsymbol: str = "",
     pe_tradingsymbol: str = "",
     entry_ce_price: float | None = None,
@@ -57,6 +58,10 @@ def set_position(
     On exit calls (position_size=0) the existing record's fields are preserved
     via fallback so the rollover checker can still read the old tradingsymbol.
     Synthetic leg fields (ce/pe tradingsymbols) are preserved the same way.
+
+    is_short_ce=True  → single-leg CE short (SELL CE, no PE leg).
+    is_synthetic=True → two-leg synthetic future (BUY CE + SELL PE for long,
+                        or the older BUY PE + SELL CE for short).
     """
     existing = state.get(instrument_name, {})
     state[instrument_name] = {
@@ -65,8 +70,9 @@ def set_position(
         # Preserve from existing if not re-supplied (e.g. on exit calls)
         "kite_tradingsymbol": kite_tradingsymbol or existing.get("kite_tradingsymbol", ""),
         "exchange":           exchange           or existing.get("exchange", ""),
-        # Synthetic futures leg data
+        # Synthetic futures / short-CE leg data
         "is_synthetic":       is_synthetic       or existing.get("is_synthetic", False),
+        "is_short_ce":        is_short_ce        or existing.get("is_short_ce", False),
         "ce_tradingsymbol":   ce_tradingsymbol   or existing.get("ce_tradingsymbol", ""),
         "pe_tradingsymbol":   pe_tradingsymbol   or existing.get("pe_tradingsymbol", ""),
         "entry_ce_price":     entry_ce_price if entry_ce_price is not None else existing.get("entry_ce_price", 0.0),
