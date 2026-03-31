@@ -198,7 +198,8 @@ def run_strategy():
 
 
 def _is_tender_period_error(exc: Exception) -> bool:
-    return "tender period" in str(exc).lower()
+    msg = str(exc).lower()
+    return "tender period" in msg or "physical delivery" in msg
 
 
 def _next_month_instrument(instrument: dict) -> dict:
