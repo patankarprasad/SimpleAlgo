@@ -671,12 +671,12 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
             set_position(state, name, -instrument["qty"], close_price, entry_sym, entry_exchange)
 
-    # A strong SELL signal (all three bearish) while long is still an exit.
-    # np.select returns "SELL" before "EXIT_LONG" when sell_cond is True,
-    # so we must handle both signals here to avoid missing the exit.
+    # SELL while long: exit the long, then also enter short (gap-down / signal flip).
+    # EXIT_LONG: exit only.
     elif signal in ("EXIT_LONG", "SELL") and pos > 0:
         if signal == "SELL":
-            logger.warning("%s: SELL fired while long — treating as EXIT_LONG", name)
+            logger.warning("%s: SELL fired while long — exiting long then entering short", name)
+        _exit_ok = False
         if is_synthetic:
             saved   = state.get(name, {})
             ce_sym  = saved.get("ce_tradingsymbol", "")
@@ -688,9 +688,29 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 trade_log.log_trade(name, "EXIT_LONG", f"{ce_sym}+{pe_sym}", order_qty)
                 notifier.notify_trade(name, "EXIT_LONG", ce_sym, order_qty, price)
                 set_position(state, name, 0)
+                _exit_ok = True
             except RuntimeError as exc:
                 logger.error("%s: Synthetic EXIT LONG failed: %s", name, exc, exc_info=True)
                 notifier.notify_synthetic_partial_fill(name, ce_sym, pe_sym, str(exc))
+            if signal == "SELL" and _exit_ok and not long_only:
+                try:
+                    target_premium = instrument.get("short_ce_target_premium", 300)
+                    ce_info, ce_ltp = _find_ce_for_short(
+                        name, exchange, expiry_date, price, strike_step, target_premium
+                    )
+                    ce_oid, entry_ce_ltp = place_short_ce(kite, instrument, ce_info)
+                    trade_log.log_trade(name, "SELL_CE", ce_info["kite_tradingsymbol"], order_qty)
+                    notifier.notify_trade(name, "SELL", ce_info["kite_tradingsymbol"], order_qty, price)
+                    set_position(
+                        state, name, -instrument["qty"], close_price,
+                        ce_info["kite_tradingsymbol"], exchange,
+                        is_short_ce=True,
+                        ce_tradingsymbol=ce_info["kite_tradingsymbol"],
+                        entry_ce_price=entry_ce_ltp or ce_ltp,
+                    )
+                except Exception as exc:
+                    logger.error("%s: Short CE SELL after exit-long failed: %s", name, exc, exc_info=True)
+                    notifier.notify_synthetic_partial_fill(name, "", "", str(exc))
         else:
             # Use symbol stored in state at entry time — may differ from resolved
             # instrument if a tender-period next-month switch occurred at entry
@@ -701,11 +721,27 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             trade_log.log_trade(name, "EXIT_LONG", exit_sym, order_qty)
             notifier.notify_trade(name, "EXIT_LONG", exit_sym, order_qty, price)
             set_position(state, name, 0)
+            if signal == "SELL" and not long_only:
+                entry_sym, entry_exchange = sym, exchange
+                try:
+                    place_sell(kite, instrument)
+                except InputException as exc:
+                    if not _is_tender_period_error(exc):
+                        raise
+                    next_inst = _next_month_instrument(instrument)
+                    place_sell(kite, next_inst)
+                    entry_sym      = next_inst["kite_tradingsymbol"]
+                    entry_exchange = next_inst["exchange"]
+                trade_log.log_trade(name, "SELL", entry_sym, order_qty)
+                notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
+                set_position(state, name, -instrument["qty"], close_price, entry_sym, entry_exchange)
 
-    # Symmetric: strong BUY while short is still an exit.
+    # BUY while short: exit the short, then also enter long (gap-up / signal flip).
+    # EXIT_SHORT: exit only.
     elif signal in ("EXIT_SHORT", "BUY") and pos < 0:
         if signal == "BUY":
-            logger.warning("%s: BUY fired while short — treating as EXIT_SHORT", name)
+            logger.warning("%s: BUY fired while short — exiting short then entering long", name)
+        _exit_ok = False
         if is_synthetic:
             saved = state.get(name, {})
             if saved.get("is_short_ce"):
@@ -716,6 +752,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     trade_log.log_trade(name, "EXIT_SHORT_CE", ce_sym, order_qty)
                     notifier.notify_trade(name, "EXIT_SHORT", ce_sym, order_qty, price)
                     set_position(state, name, 0)
+                    _exit_ok = True
                 except RuntimeError as exc:
                     logger.error("%s: Short CE BUY-back failed: %s", name, exc, exc_info=True)
                     notifier.notify_synthetic_partial_fill(name, ce_sym, "", str(exc))
@@ -730,9 +767,35 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     trade_log.log_trade(name, "EXIT_SHORT", f"{ce_sym}+{pe_sym}", order_qty)
                     notifier.notify_trade(name, "EXIT_SHORT", pe_sym, order_qty, price)
                     set_position(state, name, 0)
+                    _exit_ok = True
                 except RuntimeError as exc:
                     logger.error("%s: Synthetic EXIT SHORT failed: %s", name, exc, exc_info=True)
                     notifier.notify_synthetic_partial_fill(name, pe_sym, ce_sym, str(exc))
+            if signal == "BUY" and _exit_ok:
+                try:
+                    ce_info, pe_info = scrip_master.get_atm_options(
+                        name, exchange, price, strike_step, expiry_date
+                    )
+                    ce_oid, pe_oid, ce_ltp, pe_ltp = place_synthetic_buy(
+                        kite, instrument, ce_info, pe_info
+                    )
+                    leg_sym = f"{ce_info['kite_tradingsymbol']}+{pe_info['kite_tradingsymbol']}"
+                    trade_log.log_trade(name, "BUY_SYNTHETIC", leg_sym, order_qty)
+                    notifier.notify_trade(name, "BUY", ce_info["kite_tradingsymbol"], order_qty, price)
+                    set_position(
+                        state, name, instrument["qty"], close_price,
+                        ce_info["kite_tradingsymbol"], exchange,
+                        is_synthetic=True,
+                        ce_tradingsymbol=ce_info["kite_tradingsymbol"],
+                        pe_tradingsymbol=pe_info["kite_tradingsymbol"],
+                        entry_ce_price=ce_ltp,
+                        entry_pe_price=pe_ltp,
+                    )
+                except RuntimeError as exc:
+                    logger.error("%s: Synthetic BUY after exit-short failed: %s", name, exc, exc_info=True)
+                    notifier.notify_synthetic_partial_fill(
+                        name, str(exc).split("CE placed")[-1][:60], "", str(exc)
+                    )
         else:
             # Use symbol stored in state at entry time — may differ from resolved
             # instrument if a tender-period next-month switch occurred at entry
@@ -743,6 +806,20 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             trade_log.log_trade(name, "EXIT_SHORT", exit_sym, order_qty)
             notifier.notify_trade(name, "EXIT_SHORT", exit_sym, order_qty, price)
             set_position(state, name, 0)
+            if signal == "BUY":
+                entry_sym, entry_exchange = sym, exchange
+                try:
+                    place_buy(kite, instrument)
+                except InputException as exc:
+                    if not _is_tender_period_error(exc):
+                        raise
+                    next_inst = _next_month_instrument(instrument)
+                    place_buy(kite, next_inst)
+                    entry_sym      = next_inst["kite_tradingsymbol"]
+                    entry_exchange = next_inst["exchange"]
+                trade_log.log_trade(name, "BUY", entry_sym, order_qty)
+                notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
+                set_position(state, name, instrument["qty"], close_price, entry_sym, entry_exchange)
 
     else:
         logger.info("%s: no action (signal=%s, pos=%d)", name, signal, pos)
