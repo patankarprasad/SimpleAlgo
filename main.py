@@ -826,8 +826,13 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         logger.info("%s: no action (signal=%s, pos=%d)", name, signal, pos)
 
 
-def run_hourly_strategy():
-    """Called at every hourly candle close (HH:00:05 IST). Processes 1H instruments."""
+def run_hourly_strategy(exchange: str | None = None):
+    """Called at every hourly candle close. Processes 1H instruments.
+
+    Args:
+        exchange: If given, only process instruments on this exchange.
+                  MCX instruments fire at HH:00:05; NFO instruments fire at HH:15:05.
+    """
     web_state.record_run()
 
     now_ist = datetime.now(IST)
@@ -842,7 +847,13 @@ def run_hourly_strategy():
 
     state = load_state()
 
-    for instrument in RESOLVED_HOURLY_INSTRUMENTS:
+    instruments = (
+        [i for i in RESOLVED_HOURLY_INSTRUMENTS if i.get("exchange") == exchange]
+        if exchange is not None
+        else RESOLVED_HOURLY_INSTRUMENTS
+    )
+
+    for instrument in instruments:
         try:
             _process_instrument(kite, state, instrument, now_ist)
         except Exception as exc:
@@ -915,8 +926,18 @@ if __name__ == "__main__":
     cron_kwargs = _candle_cron()
     scheduler   = BackgroundScheduler(timezone=IST)
     scheduler.add_job(run_strategy, CronTrigger(timezone=IST, **cron_kwargs))
-    scheduler.add_job(run_hourly_strategy, CronTrigger(timezone=IST, minute=0, second=5))
-    logger.info("Hourly scheduler added (fires at HH:00:05 IST)")
+    # MCX hourly candles close on the hour (09:00, 10:00, …)
+    scheduler.add_job(
+        lambda: run_hourly_strategy(exchange="MCX"),
+        CronTrigger(timezone=IST, minute=0, second=5),
+    )
+    logger.info("Hourly scheduler added for MCX (fires at HH:00:05 IST)")
+    # NFO hourly candles close at :15 (09:15, 10:15, …) because NSE opens at 09:15
+    scheduler.add_job(
+        lambda: run_hourly_strategy(exchange="NFO"),
+        CronTrigger(timezone=IST, minute=15, second=5),
+    )
+    logger.info("Hourly scheduler added for NFO (fires at HH:15:05 IST)")
 
     # ── Daily Telegram notifications ───────────────────────────────────────────
     # 08:30 — login reminder with auth server link
