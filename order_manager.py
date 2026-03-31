@@ -29,13 +29,14 @@ def place_buy(kite: KiteConnect, instrument: dict) -> str:
         raise RuntimeError(f"Kite session unavailable — BUY order not placed for {instrument['name']}")
     qty      = _order_qty(instrument)
     order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = instrument["exchange"],
-        tradingsymbol    = instrument["kite_tradingsymbol"],
-        transaction_type = kite.TRANSACTION_TYPE_BUY,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = instrument["exchange"],
+        tradingsymbol     = instrument["kite_tradingsymbol"],
+        transaction_type  = kite.TRANSACTION_TYPE_BUY,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "BUY order placed | %s | symbol=%s | qty=%d | order_id=%s",
@@ -50,13 +51,14 @@ def place_sell(kite: KiteConnect, instrument: dict) -> str:
         raise RuntimeError(f"Kite session unavailable — SELL order not placed for {instrument['name']}")
     qty      = _order_qty(instrument)
     order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = instrument["exchange"],
-        tradingsymbol    = instrument["kite_tradingsymbol"],
-        transaction_type = kite.TRANSACTION_TYPE_SELL,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = instrument["exchange"],
+        tradingsymbol     = instrument["kite_tradingsymbol"],
+        transaction_type  = kite.TRANSACTION_TYPE_SELL,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "SELL order placed | %s | symbol=%s | qty=%d | order_id=%s",
@@ -71,13 +73,14 @@ def close_long(kite: KiteConnect, instrument: dict) -> str:
         raise RuntimeError(f"Kite session unavailable — EXIT LONG order not placed for {instrument['name']}")
     qty      = _order_qty(instrument)
     order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = instrument["exchange"],
-        tradingsymbol    = instrument["kite_tradingsymbol"],
-        transaction_type = kite.TRANSACTION_TYPE_SELL,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = instrument["exchange"],
+        tradingsymbol     = instrument["kite_tradingsymbol"],
+        transaction_type  = kite.TRANSACTION_TYPE_SELL,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "EXIT LONG order placed | %s | symbol=%s | qty=%d | order_id=%s",
@@ -92,13 +95,14 @@ def close_short(kite: KiteConnect, instrument: dict) -> str:
         raise RuntimeError(f"Kite session unavailable — EXIT SHORT order not placed for {instrument['name']}")
     qty      = _order_qty(instrument)
     order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = instrument["exchange"],
-        tradingsymbol    = instrument["kite_tradingsymbol"],
-        transaction_type = kite.TRANSACTION_TYPE_BUY,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = instrument["exchange"],
+        tradingsymbol     = instrument["kite_tradingsymbol"],
+        transaction_type  = kite.TRANSACTION_TYPE_BUY,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "EXIT SHORT order placed | %s | symbol=%s | qty=%d | order_id=%s",
@@ -156,13 +160,14 @@ def place_synthetic_buy(
 
     # Leg 1: BUY CE
     ce_order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange,
-        tradingsymbol    = ce_info["kite_tradingsymbol"],
-        transaction_type = kite.TRANSACTION_TYPE_BUY,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = exchange,
+        tradingsymbol     = ce_info["kite_tradingsymbol"],
+        transaction_type  = kite.TRANSACTION_TYPE_BUY,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "Synthetic BUY CE placed | %s | symbol=%s | qty=%d | order_id=%s",
@@ -172,13 +177,14 @@ def place_synthetic_buy(
     # Leg 2: SELL PE
     try:
         pe_order_id = kite.place_order(
-            variety          = kite.VARIETY_REGULAR,
-            exchange         = exchange,
-            tradingsymbol    = pe_info["kite_tradingsymbol"],
-            transaction_type = kite.TRANSACTION_TYPE_SELL,
-            quantity         = qty,
-            order_type       = kite.ORDER_TYPE_MARKET,
-            product          = instrument["product"],
+            variety           = kite.VARIETY_REGULAR,
+            exchange          = exchange,
+            tradingsymbol     = pe_info["kite_tradingsymbol"],
+            transaction_type  = kite.TRANSACTION_TYPE_SELL,
+            quantity          = qty,
+            order_type        = kite.ORDER_TYPE_MARKET,
+            product           = instrument["product"],
+            market_protection = True,
         )
         logger.info(
             "Synthetic BUY PE (SELL) placed | %s | symbol=%s | qty=%d | order_id=%s",
@@ -223,13 +229,14 @@ def place_synthetic_sell(
 
     # Leg 1: BUY PE
     pe_order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange,
-        tradingsymbol    = pe_info["kite_tradingsymbol"],
-        transaction_type = kite.TRANSACTION_TYPE_BUY,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = exchange,
+        tradingsymbol     = pe_info["kite_tradingsymbol"],
+        transaction_type  = kite.TRANSACTION_TYPE_BUY,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "Synthetic SELL PE (BUY) placed | %s | symbol=%s | qty=%d | order_id=%s",
@@ -240,13 +247,14 @@ def place_synthetic_sell(
     ce_order_id = None
     try:
         ce_order_id = kite.place_order(
-            variety          = kite.VARIETY_REGULAR,
-            exchange         = exchange,
-            tradingsymbol    = ce_info["kite_tradingsymbol"],
-            transaction_type = kite.TRANSACTION_TYPE_SELL,
-            quantity         = qty,
-            order_type       = kite.ORDER_TYPE_MARKET,
-            product          = instrument["product"],
+            variety           = kite.VARIETY_REGULAR,
+            exchange          = exchange,
+            tradingsymbol     = ce_info["kite_tradingsymbol"],
+            transaction_type  = kite.TRANSACTION_TYPE_SELL,
+            quantity          = qty,
+            order_type        = kite.ORDER_TYPE_MARKET,
+            product           = instrument["product"],
+            market_protection = True,
         )
         logger.info(
             "Synthetic SELL CE (SELL) placed | %s | symbol=%s | qty=%d | order_id=%s",
@@ -291,13 +299,14 @@ def close_synthetic_long(
 
     # Leg 1: SELL CE
     ce_order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange,
-        tradingsymbol    = ce_symbol,
-        transaction_type = kite.TRANSACTION_TYPE_SELL,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = exchange,
+        tradingsymbol     = ce_symbol,
+        transaction_type  = kite.TRANSACTION_TYPE_SELL,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "Synthetic EXIT LONG SELL CE | %s | symbol=%s | order_id=%s",
@@ -307,13 +316,14 @@ def close_synthetic_long(
     # Leg 2: BUY PE
     try:
         pe_order_id = kite.place_order(
-            variety          = kite.VARIETY_REGULAR,
-            exchange         = exchange,
-            tradingsymbol    = pe_symbol,
-            transaction_type = kite.TRANSACTION_TYPE_BUY,
-            quantity         = qty,
-            order_type       = kite.ORDER_TYPE_MARKET,
-            product          = instrument["product"],
+            variety           = kite.VARIETY_REGULAR,
+            exchange          = exchange,
+            tradingsymbol     = pe_symbol,
+            transaction_type  = kite.TRANSACTION_TYPE_BUY,
+            quantity          = qty,
+            order_type        = kite.ORDER_TYPE_MARKET,
+            product           = instrument["product"],
+            market_protection = True,
         )
         logger.info(
             "Synthetic EXIT LONG BUY PE | %s | symbol=%s | order_id=%s",
@@ -355,13 +365,14 @@ def close_synthetic_short(
 
     # Leg 1: SELL PE
     pe_order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange,
-        tradingsymbol    = pe_symbol,
-        transaction_type = kite.TRANSACTION_TYPE_SELL,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = exchange,
+        tradingsymbol     = pe_symbol,
+        transaction_type  = kite.TRANSACTION_TYPE_SELL,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "Synthetic EXIT SHORT SELL PE | %s | symbol=%s | order_id=%s",
@@ -371,13 +382,14 @@ def close_synthetic_short(
     # Leg 2: BUY CE
     try:
         ce_order_id = kite.place_order(
-            variety          = kite.VARIETY_REGULAR,
-            exchange         = exchange,
-            tradingsymbol    = ce_symbol,
-            transaction_type = kite.TRANSACTION_TYPE_BUY,
-            quantity         = qty,
-            order_type       = kite.ORDER_TYPE_MARKET,
-            product          = instrument["product"],
+            variety           = kite.VARIETY_REGULAR,
+            exchange          = exchange,
+            tradingsymbol     = ce_symbol,
+            transaction_type  = kite.TRANSACTION_TYPE_BUY,
+            quantity          = qty,
+            order_type        = kite.ORDER_TYPE_MARKET,
+            product           = instrument["product"],
+            market_protection = True,
         )
         logger.info(
             "Synthetic EXIT SHORT BUY CE | %s | symbol=%s | order_id=%s",
@@ -417,13 +429,14 @@ def place_short_ce(
     exchange = ce_info.get("exchange", "NFO")
 
     order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange,
-        tradingsymbol    = ce_info["kite_tradingsymbol"],
-        transaction_type = kite.TRANSACTION_TYPE_SELL,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = exchange,
+        tradingsymbol     = ce_info["kite_tradingsymbol"],
+        transaction_type  = kite.TRANSACTION_TYPE_SELL,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "Short CE SELL placed | %s | symbol=%s | strike=%s | qty=%d | order_id=%s",
@@ -462,13 +475,14 @@ def close_short_ce(
     qty = instrument["qty"] * instrument["lot_size"]
 
     order_id = kite.place_order(
-        variety          = kite.VARIETY_REGULAR,
-        exchange         = exchange,
-        tradingsymbol    = ce_symbol,
-        transaction_type = kite.TRANSACTION_TYPE_BUY,
-        quantity         = qty,
-        order_type       = kite.ORDER_TYPE_MARKET,
-        product          = instrument["product"],
+        variety           = kite.VARIETY_REGULAR,
+        exchange          = exchange,
+        tradingsymbol     = ce_symbol,
+        transaction_type  = kite.TRANSACTION_TYPE_BUY,
+        quantity          = qty,
+        order_type        = kite.ORDER_TYPE_MARKET,
+        product           = instrument["product"],
+        market_protection = True,
     )
     logger.info(
         "Short CE BUY-back placed | %s | symbol=%s | qty=%d | order_id=%s",
