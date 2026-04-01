@@ -31,6 +31,7 @@ from flask import Flask, jsonify, redirect, request, session, url_for
 from kiteconnect import KiteConnect
 
 import config
+import contract_pin
 import strategy_config as stcfg
 import trade_log as tlog
 import web_state
@@ -141,6 +142,20 @@ pre.log{background:#0a0c12;border:1px solid var(--border);border-radius:8px;
 .tog-btn:hover{opacity:.82}
 .tog-on {background:rgba(22,163,74,.2);color:var(--green-l);border:1px solid var(--green-b)}
 .tog-off{background:rgba(75,85,104,.3);color:var(--muted);border:1px solid var(--border)}
+
+/* ── Rollover / contract pin ── */
+.rollover-wrap{display:flex;align-items:center;gap:8px;padding:6px 0 2px;
+               border-top:1px solid var(--border);flex-wrap:wrap}
+.rollover-btn{padding:3px 10px;border:none;border-radius:8px;font-size:.72rem;
+              font-weight:600;cursor:pointer;transition:opacity .15s;
+              background:rgba(234,179,8,.15);color:#fde047;
+              border:1px solid rgba(234,179,8,.35)}
+.rollover-btn:hover{opacity:.82}
+.pin-badge{font-size:.68rem;color:#fde047;flex:1}
+.pin-clear-btn{padding:2px 8px;border:none;border-radius:6px;font-size:.68rem;
+               cursor:pointer;background:rgba(239,68,68,.15);color:#fca5a5;
+               border:1px solid rgba(239,68,68,.3)}
+.pin-clear-btn:hover{opacity:.82}
 
 /* ── Card P&L ── */
 .card-pnl{font-size:1rem;font-weight:700;margin:6px 0 10px;
@@ -388,15 +403,27 @@ def dashboard():
     hourly_names   = [i["name"] for i in config.HOURLY_INSTRUMENTS]
     hourly_enabled = stcfg.get_all(hourly_names)
 
+    # Build name → exchange lookup and load all active pins
+    inst_exchange = {i["name"]: i["exchange"] for i in config.INSTRUMENTS + config.HOURLY_INSTRUMENTS}
+    all_pins      = contract_pin.list_pins()
+
     # Instrument cards — show all configured instruments, even before first candle
     instruments = snap["instruments"]
     cards = "".join(
-        _make_card(name, instruments.get(name, {}), state, enabled_map.get(name, True))
+        _make_card(
+            name, instruments.get(name, {}), state, enabled_map.get(name, True),
+            exchange=inst_exchange.get(name, ""),
+            pin=all_pins.get(name.upper()),
+        )
         for name in inst_names
     )
     hourly_cards = "".join(
-        _make_card(name, instruments.get(name, {}), state,
-                   hourly_enabled.get(name, True), timeframe_label="1H")
+        _make_card(
+            name, instruments.get(name, {}), state,
+            hourly_enabled.get(name, True), timeframe_label="1H",
+            exchange=inst_exchange.get(name, ""),
+            pin=all_pins.get(name.upper()),
+        )
         for name in hourly_names
     )
 
@@ -427,7 +454,8 @@ def dashboard():
 
 
 def _make_card(name: str, data: dict, state: dict, enabled: bool,
-               timeframe_label: str = "") -> str:
+               timeframe_label: str = "", exchange: str = "",
+               pin: dict | None = None) -> str:
     pos_size    = state.get(name, {}).get("position_size", 0)
     entry_price = state.get(name, {}).get("entry_price", 0.0)
     signal      = str(data.get("signal", ""))
@@ -500,6 +528,30 @@ def _make_card(name: str, data: dict, state: dict, enabled: bool,
         f'{timeframe_label}</span>'
     ) if timeframe_label else ""
 
+    # ── Rollover section ──────────────────────────────────────────────────────
+    rollover_html = ""
+    if exchange:
+        if pin:
+            pin_sym = pin.get("kite_tradingsymbol", "")
+            pin_exp = pin.get("expiry", "")
+            rollover_html = f"""
+  <div class="rollover-wrap">
+    <span class="pin-badge">&#128204; Pinned: {pin_sym} (exp {pin_exp})</span>
+    <form method="post" action="/instrument/rollover/clear" style="margin:0">
+      <input type="hidden" name="name"     value="{name}">
+      <button type="submit" class="pin-clear-btn">&#10005; Clear Pin</button>
+    </form>
+  </div>"""
+        else:
+            rollover_html = f"""
+  <div class="rollover-wrap">
+    <form method="post" action="/instrument/rollover" style="margin:0">
+      <input type="hidden" name="name"     value="{name}">
+      <input type="hidden" name="exchange" value="{exchange}">
+      <button type="submit" class="rollover-btn">&#8594; Roll to Next Month</button>
+    </form>
+  </div>"""
+
     return f"""
 <div class="card">
   <div{body_style}>
@@ -515,6 +567,7 @@ def _make_card(name: str, data: dict, state: dict, enabled: bool,
     {metrics_html}
     <div class="card-foot">Updated {updated_str}</div>
   </div>
+  {rollover_html}
   {toggle_html}
 </div>"""
 
@@ -529,6 +582,39 @@ def strategy_toggle():
     if name:
         stcfg.set_enabled(name, enabled)
         logger.info("Strategy %s set to enabled=%s", name, enabled)
+    return redirect("/")
+
+
+# ── Contract rollover / pin routes ────────────────────────────────────────────
+
+@app.route("/instrument/rollover", methods=["POST"])
+@login_required
+def instrument_rollover():
+    """Pin the next-month futures contract for an instrument."""
+    name     = request.form.get("name",     "").strip()
+    exchange = request.form.get("exchange", "").strip()
+    if not name or not exchange:
+        logger.warning("instrument_rollover: missing name or exchange")
+        return redirect("/")
+    try:
+        pinned = contract_pin.pin_next_month(name, exchange)
+        logger.info(
+            "Webapp: rollover pin set for %s → %s (expires %s)",
+            name, pinned["kite_tradingsymbol"], pinned["expiry"],
+        )
+    except Exception as exc:
+        logger.error("instrument_rollover failed for %s: %s", name, exc)
+    return redirect("/")
+
+
+@app.route("/instrument/rollover/clear", methods=["POST"])
+@login_required
+def instrument_rollover_clear():
+    """Clear the contract pin for an instrument, reverting to auto-select."""
+    name = request.form.get("name", "").strip()
+    if name:
+        contract_pin.clear_pin(name)
+        logger.info("Webapp: rollover pin cleared for %s", name)
     return redirect("/")
 
 
