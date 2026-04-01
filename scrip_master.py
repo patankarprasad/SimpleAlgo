@@ -267,7 +267,21 @@ def resolve_instrument(inst_def: dict) -> dict:
         angel_token, angel_symbol,
         kite_tradingsymbol, kite_instrument_token,
         expiry, lot_size, tick_size
+
+    If a manual rollover pin exists for this instrument (set via
+    contract_pin.pin_next_month()), that contract is used instead of the
+    auto-selected nearest expiry.
     """
+    import contract_pin  # late import to avoid circular dependency
+
+    pinned = contract_pin.get_pinned_contract(inst_def["name"])
+    if pinned:
+        logger.info(
+            "%s: using pinned contract %s (expires %s)",
+            inst_def["name"], pinned["kite_tradingsymbol"], pinned["expiry"],
+        )
+        return {**inst_def, **pinned}
+
     contract = get_nearest_future(
         inst_def["name"],
         inst_def["exchange"],           # both brokers share the same exchange name

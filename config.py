@@ -205,7 +205,8 @@ HOURLY_INSTRUMENTS = [
 ]
 
 # ── Session token cache paths ──────────────────────────────────────────────────
-KITE_TOKEN_FILE   = "kite_token.json"
-ANGEL_TOKEN_FILE  = "angel_token.json"
-STATE_FILE        = "positions_state.json"
-PAPER_STATE_FILE  = "paper_positions_state.json"  # persisted paper trade positions
+KITE_TOKEN_FILE    = "kite_token.json"
+ANGEL_TOKEN_FILE   = "angel_token.json"
+STATE_FILE         = "positions_state.json"
+PAPER_STATE_FILE   = "paper_positions_state.json"  # persisted paper trade positions
+CONTRACT_PIN_FILE  = "contract_pin.json"            # manual rollover overrides

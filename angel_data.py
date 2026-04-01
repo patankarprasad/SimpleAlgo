@@ -21,6 +21,12 @@ from angel_login import force_relogin, get_angel_session
 
 logger = logging.getLogger(__name__)
 
+# ── Candle retry configuration ─────────────────────────────────────────────────
+_CANDLE_MAX_RETRIES   = 5     # total attempts (1 initial + 4 retries)
+_CANDLE_RETRY_BASE    = 2.0   # seconds to wait after first failure
+_CANDLE_RETRY_BACKOFF = 2.0   # multiplier applied on each subsequent retry
+_CANDLE_RETRY_MAX     = 30.0  # cap on wait time (seconds)
+
 # ── Interval string normalisation ──────────────────────────────────────────────
 INTERVAL_MAP = {
     # Short aliases (used in .env)
@@ -93,22 +99,44 @@ def get_candles(instrument: dict, n_candles: int = None, interval: str = None) -
         instrument["name"], params["exchange"], params["symboltoken"], interval,
     )
 
-    # Respect Angel's rate limit between consecutive historical data calls
-    time.sleep(config.ANGEL_BASE_DELAY)
-    resp = angel.getCandleData(params)
-    if "status" not in resp or resp.get("status") is False or not resp.get("data"):
+    # Fetch with retry: relogin once on first failure, then exponential backoff
+    resp         = None
+    relogin_done = False
+    retry_delay  = _CANDLE_RETRY_BASE
+
+    for attempt in range(1, _CANDLE_MAX_RETRIES + 1):
+        time.sleep(config.ANGEL_BASE_DELAY)  # always honour rate limit before each call
+        try:
+            resp = angel.getCandleData(params)
+        except Exception as exc:
+            resp = {"status": False, "message": str(exc)}
+
+        if "status" in resp and resp.get("status") is not False and resp.get("data"):
+            break  # success
+
         logger.warning(
-            "Angel getCandleData bad response for %s (attempt 1): %s",
-            instrument["name"], resp,
+            "Angel getCandleData bad response for %s (attempt %d/%d): %s",
+            instrument["name"], attempt, _CANDLE_MAX_RETRIES, resp,
         )
-        logger.info("Angel: forcing re-login and retrying getCandleData ...")
-        angel = force_relogin()
-        time.sleep(config.ANGEL_BASE_DELAY)
-        resp = angel.getCandleData(params)
-        if "status" not in resp or resp.get("status") is False or not resp.get("data"):
+
+        if attempt == _CANDLE_MAX_RETRIES:
             raise RuntimeError(
-                f"Angel getCandleData failed for {instrument['name']} after re-login: {resp}"
+                f"Angel getCandleData failed for {instrument['name']} after "
+                f"{_CANDLE_MAX_RETRIES} attempts: {resp}"
             )
+
+        if not relogin_done:
+            logger.info("Angel: forcing re-login before next retry ...")
+            angel        = force_relogin()
+            relogin_done = True
+        else:
+            wait = min(retry_delay, _CANDLE_RETRY_MAX)
+            logger.info(
+                "Angel: waiting %.1fs before retry %d/%d ...",
+                wait, attempt + 1, _CANDLE_MAX_RETRIES,
+            )
+            time.sleep(wait)
+            retry_delay *= _CANDLE_RETRY_BACKOFF
 
     df = pd.DataFrame(
         resp["data"],
