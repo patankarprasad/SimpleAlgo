@@ -585,7 +585,7 @@ def positions():
             pe_pnl      = pe_live.get("pnl")
             pnl_val     = (ce_pnl + pe_pnl) if (ce_pnl is not None and pe_pnl is not None) \
                           else (ce_pnl if ce_pnl is not None else pe_pnl)
-            avg_price   = pos_data.get("entry_ce_price", 0)
+            avg_price   = ce_live.get("average_price") or pos_data.get("entry_ce_price", 0)
             last_price  = ce_live.get("last_price") or idata.get(name, {}).get("close")
         elif is_short_ce and ce_sym:
             # Single-leg short CE
@@ -612,8 +612,11 @@ def positions():
 
         display_qty = abs(live_qty) if live_qty is not None else abs(algo_pos)
         qty_note    = ""
-        if live_qty is not None and live_qty != algo_pos:
-            qty_note = ' <span title="Kite qty differs from algo state" style="color:var(--orange-l)">&#9888;</span>'
+        # For synthetic/short-CE, qty confirmation is handled by the status check;
+        # suppress the inline warning to avoid noise from legacy state (lots vs contracts).
+        if not is_synthetic and not is_short_ce:
+            if live_qty is not None and live_qty != algo_pos:
+                qty_note = ' <span title="Kite qty differs from algo state" style="color:var(--orange-l)">&#9888;</span>'
 
         if pnl_val is not None:
             total_pnl += pnl_val
@@ -634,12 +637,19 @@ def positions():
         if kite_error:
             status = '<span style="font-size:.72rem;color:var(--orange-l)">Kite unavailable</span>'
         elif is_synthetic and ce_sym and pe_sym:
-            # Both legs must match: CE qty == algo_pos, PE qty == -algo_pos
+            # Confirm both legs are present with equal sizes and correct directions.
+            # Direction: LONG → CE qty > 0, PE qty < 0; SHORT → CE qty < 0, PE qty > 0.
+            # We compare leg directions/sizes from Kite, NOT against stored position_size,
+            # so this works correctly even for positions opened before the lots→contracts fix.
             ce_qty = kite_net.get(ce_sym, {}).get("quantity")
             pe_qty = kite_net.get(pe_sym, {}).get("quantity")
-            if ce_qty is not None and pe_qty is not None \
-                    and ce_qty == algo_pos and pe_qty == -algo_pos:
-                status = '<span style="font-size:.72rem;color:var(--green-l)">&#10003; Confirmed</span>'
+            if ce_qty is not None and pe_qty is not None and abs(ce_qty) == abs(pe_qty):
+                direction_ok = (algo_pos > 0 and ce_qty > 0 and pe_qty < 0) or \
+                               (algo_pos < 0 and ce_qty < 0 and pe_qty > 0)
+                if direction_ok:
+                    status = '<span style="font-size:.72rem;color:var(--green-l)">&#10003; Confirmed</span>'
+                else:
+                    status = '<span style="font-size:.72rem;color:var(--orange-l)">&#9888; Mismatch</span>'
             elif ce_qty is not None or pe_qty is not None:
                 status = '<span style="font-size:.72rem;color:var(--orange-l)">&#9888; Mismatch</span>'
             else:
