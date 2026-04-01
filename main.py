@@ -161,6 +161,11 @@ def _check_rollover():
         saved   = state.get(name, {})
         old_sym = saved.get("kite_tradingsymbol", "")
         pos     = saved.get("position_size", 0)
+        # Synthetic futures (options CE+PE) and short-CE positions hold options
+        # contracts to expiry — their kite_tradingsymbol is a CE symbol, not a
+        # futures contract, so the futures-rollover check does not apply to them.
+        if saved.get("is_synthetic") or saved.get("is_short_ce"):
+            continue
         if pos != 0 and old_sym and old_sym != new_sym:
             logger.critical(
                 "ROLLOVER DETECTED: %s — open position in %s but contract is now %s. "
