@@ -606,7 +606,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 trade_log.log_trade(name, "BUY_SYNTHETIC", leg_sym, order_qty)
                 notifier.notify_trade(name, "BUY", ce_info["kite_tradingsymbol"], order_qty, price)
                 set_position(
-                    state, name, instrument["qty"], close_price,
+                    state, name, order_qty, close_price,
                     ce_info["kite_tradingsymbol"], exchange,
                     is_synthetic=True,
                     ce_tradingsymbol=ce_info["kite_tradingsymbol"],
@@ -632,7 +632,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 entry_exchange = next_inst["exchange"]
             trade_log.log_trade(name, "BUY", entry_sym, order_qty)
             notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
-            set_position(state, name, instrument["qty"], close_price, entry_sym, entry_exchange)
+            set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
 
     elif signal == "SELL" and pos == 0:
         if long_only:
@@ -648,7 +648,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 trade_log.log_trade(name, "SELL_CE", ce_info["kite_tradingsymbol"], order_qty)
                 notifier.notify_trade(name, "SELL", ce_info["kite_tradingsymbol"], order_qty, price)
                 set_position(
-                    state, name, -instrument["qty"], close_price,
+                    state, name, -order_qty, close_price,
                     ce_info["kite_tradingsymbol"], exchange,
                     is_short_ce=True,
                     ce_tradingsymbol=ce_info["kite_tradingsymbol"],
@@ -670,7 +670,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 entry_exchange = next_inst["exchange"]
             trade_log.log_trade(name, "SELL", entry_sym, order_qty)
             notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
-            set_position(state, name, -instrument["qty"], close_price, entry_sym, entry_exchange)
+            set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
 
     # SELL while long: exit the long, then also enter short (gap-down / signal flip).
     # EXIT_LONG: exit only.
@@ -735,7 +735,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     entry_exchange = next_inst["exchange"]
                 trade_log.log_trade(name, "SELL", entry_sym, order_qty)
                 notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
-                set_position(state, name, -instrument["qty"], close_price, entry_sym, entry_exchange)
+                set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
 
     # BUY while short: exit the short, then also enter long (gap-up / signal flip).
     # EXIT_SHORT: exit only.
@@ -820,7 +820,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     entry_exchange = next_inst["exchange"]
                 trade_log.log_trade(name, "BUY", entry_sym, order_qty)
                 notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
-                set_position(state, name, instrument["qty"], close_price, entry_sym, entry_exchange)
+                set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
 
     else:
         logger.info("%s: no action (signal=%s, pos=%d)", name, signal, pos)
