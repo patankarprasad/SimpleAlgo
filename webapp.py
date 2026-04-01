@@ -369,7 +369,9 @@ def dashboard():
     enabled_map = stcfg.get_all(inst_names)
 
     # Status badges
-    if tok["valid"]:
+    if config.DRY_RUN:
+        tok_badge = '<span class="badge b-ok">&#10003; Kite token not required (DRY RUN)</span>'
+    elif tok["valid"]:
         tok_badge = '<span class="badge b-ok">&#10003; Kite token valid</span>'
     else:
         note = f"last: {tok['date']}" if tok["date"] else "never"
@@ -565,15 +567,41 @@ def positions():
     short_count   = 0
 
     for name, pos_data in algo_positions.items():
-        algo_pos = pos_data.get("position_size", 0)
-        sym      = pos_data.get("kite_tradingsymbol") or idata.get(name, {}).get("kite_tradingsymbol", "-")
-        sig      = str(idata.get(name, {}).get("signal", ""))
+        algo_pos     = pos_data.get("position_size", 0)
+        sym          = pos_data.get("kite_tradingsymbol") or idata.get(name, {}).get("kite_tradingsymbol", "-")
+        sig          = str(idata.get(name, {}).get("signal", ""))
+        is_synthetic = pos_data.get("is_synthetic", False)
+        is_short_ce  = pos_data.get("is_short_ce", False)
+        ce_sym       = pos_data.get("ce_tradingsymbol", "")
+        pe_sym       = pos_data.get("pe_tradingsymbol", "")
 
-        kite_live  = kite_net.get(sym, {})
-        live_qty   = kite_live.get("quantity")
-        avg_price  = kite_live.get("average_price") or pos_data.get("entry_price", 0)
-        last_price = kite_live.get("last_price")    or idata.get(name, {}).get("close")
-        pnl_val    = kite_live.get("pnl")
+        if is_synthetic and ce_sym and pe_sym:
+            # Two-leg synthetic future: look up CE and PE positions separately
+            sym_display = f"{ce_sym} / {pe_sym}"
+            ce_live     = kite_net.get(ce_sym, {})
+            pe_live     = kite_net.get(pe_sym, {})
+            live_qty    = ce_live.get("quantity")
+            ce_pnl      = ce_live.get("pnl")
+            pe_pnl      = pe_live.get("pnl")
+            pnl_val     = (ce_pnl + pe_pnl) if (ce_pnl is not None and pe_pnl is not None) \
+                          else (ce_pnl if ce_pnl is not None else pe_pnl)
+            avg_price   = pos_data.get("entry_ce_price", 0)
+            last_price  = ce_live.get("last_price") or idata.get(name, {}).get("close")
+        elif is_short_ce and ce_sym:
+            # Single-leg short CE
+            sym_display = ce_sym
+            kite_live   = kite_net.get(ce_sym, {})
+            live_qty    = kite_live.get("quantity")
+            pnl_val     = kite_live.get("pnl")
+            avg_price   = pos_data.get("entry_ce_price", 0) or kite_live.get("average_price", 0)
+            last_price  = kite_live.get("last_price") or idata.get(name, {}).get("close")
+        else:
+            sym_display = sym
+            kite_live   = kite_net.get(sym, {})
+            live_qty    = kite_live.get("quantity")
+            pnl_val     = kite_live.get("pnl")
+            avg_price   = kite_live.get("average_price") or pos_data.get("entry_price", 0)
+            last_price  = kite_live.get("last_price")    or idata.get(name, {}).get("close")
 
         if algo_pos > 0:
             dir_html = '<span class="pill pl-buy">LONG</span>'
@@ -605,6 +633,17 @@ def positions():
 
         if kite_error:
             status = '<span style="font-size:.72rem;color:var(--orange-l)">Kite unavailable</span>'
+        elif is_synthetic and ce_sym and pe_sym:
+            # Both legs must match: CE qty == algo_pos, PE qty == -algo_pos
+            ce_qty = kite_net.get(ce_sym, {}).get("quantity")
+            pe_qty = kite_net.get(pe_sym, {}).get("quantity")
+            if ce_qty is not None and pe_qty is not None \
+                    and ce_qty == algo_pos and pe_qty == -algo_pos:
+                status = '<span style="font-size:.72rem;color:var(--green-l)">&#10003; Confirmed</span>'
+            elif ce_qty is not None or pe_qty is not None:
+                status = '<span style="font-size:.72rem;color:var(--orange-l)">&#9888; Mismatch</span>'
+            else:
+                status = "-"
         elif live_qty is not None and live_qty == algo_pos:
             status = '<span style="font-size:.72rem;color:var(--green-l)">&#10003; Confirmed</span>'
         elif live_qty is not None and live_qty != algo_pos:
@@ -614,7 +653,7 @@ def positions():
 
         rows += f"""<tr>
   <td><strong>{name}</strong></td>
-  <td style="color:var(--muted);font-size:.78rem">{sym}</td>
+  <td style="color:var(--muted);font-size:.78rem">{sym_display}</td>
   <td>{dir_html}</td>
   <td style="text-align:right">{display_qty}{qty_note}</td>
   <td style="text-align:right">{_fmt(avg_price)}</td>
@@ -950,43 +989,12 @@ def log_view():
 
 # ── Kite Login (/kite/login, /callback) ───────────────────────────────────────
 
-@app.route("/kite/login", methods=["GET", "POST"])
+@app.route("/kite/login", methods=["GET"])
 @login_required
 def kite_login_page():
-    error = ""
-    if request.method == "POST":
-        entered = request.form.get("pin", "").strip()
-        if entered == str(config.KITE_AUTH_PIN):
-            kite = KiteConnect(api_key=config.KITE_API_KEY)
-            logger.info("Kite login initiated from web UI")
-            return redirect(kite.login_url())
-        error = "Incorrect PIN. Try again."
-
-    tok = _token_status()
-    if tok["valid"]:
-        tok_note = '<span class="badge b-ok" style="margin-bottom:20px;display:inline-flex">&#10003; Token already valid today</span>'
-    else:
-        note = f"last: {tok['date']}" if tok["date"] else "never"
-        tok_note = f'<span class="badge b-warn" style="margin-bottom:20px;display:inline-flex">&#9888; No valid token ({note})</span>'
-
-    body = f"""
-<div class="auth-wrap">
-  <div class="auth-card">
-    <h1>Kite Login</h1>
-    <p class="subtitle">Authenticate with Zerodha to enable order placement</p>
-    {tok_note}
-    {'<p class="err-msg">' + error + '</p>' if error else ''}
-    <form method="post">
-      <label for="pin">App PIN</label>
-      <input type="password" id="pin" name="pin" inputmode="numeric"
-             autocomplete="current-password" autofocus placeholder="••••">
-      <button type="submit" class="btn btn-primary">Continue to Zerodha &rarr;</button>
-    </form>
-    <hr>
-    <a href="/" class="btn btn-secondary">Back to Dashboard</a>
-  </div>
-</div>"""
-    return _layout("Kite Login", body, active="kite")
+    kite = KiteConnect(api_key=config.KITE_API_KEY)
+    logger.info("Kite login initiated from web UI")
+    return redirect(kite.login_url())
 
 
 @app.route("/callback")
@@ -1046,7 +1054,7 @@ def api_status():
     tok  = _token_status()
     sched = snap["scheduler"]
     return jsonify({
-        "kite_token_valid": tok["valid"],
+        "kite_token_valid": True if config.DRY_RUN else tok["valid"],
         "scheduler_running": sched["running"],
         "last_run":  sched["last_run"].isoformat() if sched["last_run"] else None,
         "run_count": sched["run_count"],
