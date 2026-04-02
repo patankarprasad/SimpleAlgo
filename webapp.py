@@ -403,9 +403,11 @@ def dashboard():
     hourly_names   = [i["name"] for i in config.HOURLY_INSTRUMENTS]
     hourly_enabled = stcfg.get_all(hourly_names)
 
-    # Build name → exchange lookup and load all active pins
-    inst_exchange = {i["name"]: i["exchange"] for i in config.INSTRUMENTS + config.HOURLY_INSTRUMENTS}
-    all_pins      = contract_pin.list_pins()
+    # Build name → exchange/mode lookup and load all active pins
+    inst_exchange  = {i["name"]: i["exchange"] for i in config.INSTRUMENTS + config.HOURLY_INSTRUMENTS}
+    inst_synthetic = {i["name"] for i in config.INSTRUMENTS + config.HOURLY_INSTRUMENTS
+                      if i.get("mode") == "SYNTHETIC"}
+    all_pins       = contract_pin.list_pins()
 
     # Instrument cards — show all configured instruments, even before first candle
     instruments = snap["instruments"]
@@ -414,6 +416,7 @@ def dashboard():
             name, instruments.get(name, {}), state, enabled_map.get(name, True),
             exchange=inst_exchange.get(name, ""),
             pin=all_pins.get(name.upper()),
+            show_rollover=(name not in inst_synthetic),
         )
         for name in inst_names
     )
@@ -423,6 +426,7 @@ def dashboard():
             hourly_enabled.get(name, True), timeframe_label="1H",
             exchange=inst_exchange.get(name, ""),
             pin=all_pins.get(name.upper()),
+            show_rollover=(name not in inst_synthetic),
         )
         for name in hourly_names
     )
@@ -455,7 +459,7 @@ def dashboard():
 
 def _make_card(name: str, data: dict, state: dict, enabled: bool,
                timeframe_label: str = "", exchange: str = "",
-               pin: dict | None = None) -> str:
+               pin: dict | None = None, show_rollover: bool = True) -> str:
     pos_size    = state.get(name, {}).get("position_size", 0)
     entry_price = state.get(name, {}).get("entry_price", 0.0)
     signal      = str(data.get("signal", ""))
@@ -530,7 +534,7 @@ def _make_card(name: str, data: dict, state: dict, enabled: bool,
 
     # ── Rollover section ──────────────────────────────────────────────────────
     rollover_html = ""
-    if exchange:
+    if show_rollover and exchange:
         if pin:
             pin_sym = pin.get("kite_tradingsymbol", "")
             pin_exp = pin.get("expiry", "")
@@ -597,11 +601,23 @@ def instrument_rollover():
         logger.warning("instrument_rollover: missing name or exchange")
         return redirect("/")
     try:
-        pinned = contract_pin.pin_next_month(name, exchange)
+        # Use the currently-resolved instrument's expiry as reference so we pin
+        # the month AFTER whatever is currently being traded — not just contracts[1]
+        # from the scrip master (which could skip a month if the near contract
+        # has already expired from the master's active list).
+        import main as _main
+        current = next(
+            (i for i in _main.RESOLVED_INSTRUMENTS if i["name"] == name), None
+        )
+        after_expiry = current.get("expiry") if current else None
+        pinned = contract_pin.pin_next_month(name, exchange, after_expiry=after_expiry)
         logger.info(
             "Webapp: rollover pin set for %s → %s (expires %s)",
             name, pinned["kite_tradingsymbol"], pinned["expiry"],
         )
+        # Immediately update the in-memory resolved instrument so the next
+        # strategy tick picks up the new contract without needing an app restart.
+        _main.re_resolve_instrument(name)
     except Exception as exc:
         logger.error("instrument_rollover failed for %s: %s", name, exc)
     return redirect("/")

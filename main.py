@@ -143,6 +143,35 @@ def initialise():
     web_state.set_resolved_instruments(RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS)
 
 
+def re_resolve_instrument(name: str) -> bool:
+    """
+    Re-resolve a single instrument in RESOLVED_INSTRUMENTS (e.g. after a pin change).
+    Returns True if the instrument was found and updated, False if not found.
+    """
+    global RESOLVED_INSTRUMENTS
+    idx = next((i for i, inst in enumerate(RESOLVED_INSTRUMENTS) if inst["name"] == name), None)
+    if idx is None:
+        logger.warning("re_resolve_instrument: %s not found in RESOLVED_INSTRUMENTS", name)
+        return False
+    inst_def = {k: v for k, v in RESOLVED_INSTRUMENTS[idx].items()
+                if k in ("name", "exchange", "qty", "lot_size", "contract_size",
+                         "timeframe", "trade_start", "trade_end", "product",
+                         "long_only", "mode", "strike_step", "short_ce_target_premium",
+                         "spot_index_name")}
+    try:
+        resolved = scrip_master.resolve_instrument(inst_def)
+        RESOLVED_INSTRUMENTS[idx] = resolved
+        web_state.set_resolved_instruments(RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS)
+        logger.info(
+            "re_resolve_instrument: %s → %s (expiry %s)",
+            name, resolved["kite_tradingsymbol"], resolved.get("expiry"),
+        )
+        return True
+    except Exception as exc:
+        logger.error("re_resolve_instrument: failed to re-resolve %s: %s", name, exc)
+        return False
+
+
 # ── Contract rollover check ────────────────────────────────────────────────────
 
 def _check_rollover():
@@ -209,21 +238,40 @@ def _is_tender_period_error(exc: Exception) -> bool:
 
 def _next_month_instrument(instrument: dict) -> dict:
     """
-    Return an instrument dict updated to the second-nearest futures contract.
-    Used when the nearest contract is blocked due to entering tender period.
+    Return an instrument dict updated to the next futures contract after the
+    current one's expiry.  Used when the nearest contract is blocked due to
+    entering tender period.
     The caller is responsible for saving the new kite_tradingsymbol to state.
     """
     contracts = scrip_master.get_all_futures(instrument["name"], instrument["exchange"])
-    if len(contracts) < 2:
+    if not contracts:
         raise RuntimeError(
-            f"No next-month contract available for {instrument['name']} "
+            f"No active contracts available for {instrument['name']} "
             f"on {instrument['exchange']}"
         )
-    next_contract = contracts[1]  # second nearest, sorted by expiry
+
+    current_expiry = instrument.get("expiry")
+    next_contract = None
+
+    if current_expiry:
+        # Find the first contract whose expiry is strictly after the current one.
+        # This correctly handles the case where the current instrument is already
+        # the nearest active contract (e.g. pinned May) — we skip to June only if
+        # May itself is in tender period, not because April happened to expire.
+        for c in contracts:
+            if c["expiry"] > current_expiry:
+                next_contract = c
+                break
+
+    if next_contract is None:
+        # Fallback: no current expiry info, or all active contracts have the same
+        # expiry — take the second nearest if available, else the nearest.
+        next_contract = contracts[1] if len(contracts) >= 2 else contracts[0]
+
     logger.warning(
-        "%s: tender-period — switching from %s to next-month %s",
-        instrument["name"], instrument["kite_tradingsymbol"],
-        next_contract["kite_tradingsymbol"],
+        "%s: tender-period — switching from %s (expiry %s) to next-month %s (expiry %s)",
+        instrument["name"], instrument["kite_tradingsymbol"], current_expiry,
+        next_contract["kite_tradingsymbol"], next_contract["expiry"],
     )
     return {**instrument, **next_contract}
 
