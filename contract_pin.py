@@ -56,28 +56,35 @@ def _save(pins: dict) -> None:
 
 # ── Public API ─────────────────────────────────────────────────────────────────
 
-def pin_next_month(name: str, exchange: str) -> dict:
+def pin_next_month(name: str, exchange: str, after_expiry: date | None = None) -> dict:
     """
-    Pin the NEXT-nearest futures contract for ``name`` on ``exchange``.
+    Pin the futures contract for ``name`` on ``exchange`` whose expiry is the
+    first one strictly after ``after_expiry``.
 
-    Looks up the second-nearest active contract from the scrip master (i.e.
-    next month's expiry) and persists the choice.  Subsequent calls to
-    ``scrip_master.resolve_instrument()`` will use this contract instead of
-    the auto-selected nearest one.
+    If ``after_expiry`` is None, the nearest active contract's expiry is used
+    as the reference (i.e. pin the month after whatever is currently nearest).
 
     Returns the pinned contract dict (same keys as ``get_nearest_future()``).
-    Raises ``RuntimeError`` if fewer than 2 active contracts exist.
+    Raises ``RuntimeError`` if no suitable next contract exists.
     """
     import scrip_master  # late import to avoid circular dependency at module level
 
     contracts = scrip_master.get_all_futures(name, exchange)
-    if len(contracts) < 2:
+    if not contracts:
         raise RuntimeError(
-            f"No next-month contract available for {name} on {exchange}. "
-            "Only one active contract found in the scrip master."
+            f"No active contracts found for {name} on {exchange}."
         )
 
-    contract = contracts[1]  # second-nearest = next month's expiry
+    # Determine reference expiry: caller-supplied, or nearest active contract.
+    ref_expiry = after_expiry if after_expiry is not None else contracts[0]["expiry"]
+
+    # First contract whose expiry is strictly after the reference.
+    contract = next((c for c in contracts if c["expiry"] > ref_expiry), None)
+    if contract is None:
+        raise RuntimeError(
+            f"No next-month contract available for {name} on {exchange} "
+            f"after expiry {ref_expiry}."
+        )
     pins = _load()
     pins[name.upper()] = {
         # Spread all contract fields; convert any date objects to ISO strings for JSON
