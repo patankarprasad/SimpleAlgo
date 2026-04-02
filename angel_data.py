@@ -251,27 +251,37 @@ def get_option_ltps(options: list[dict]) -> dict[str, float]:
     if not exchange_tokens:
         return {}
 
+    # Angel getMarketData accepts at most 50 tokens per exchange per call.
+    # Split each exchange's list into chunks and merge results.
+    _ANGEL_LTP_CHUNK = 50
+
+    def _chunks(lst, n):
+        for i in range(0, len(lst), n):
+            yield lst[i : i + n]
+
     angel  = get_angel_session()
     result = {}
-    try:
-        time.sleep(config.ANGEL_LTP_DELAY)
-        resp = angel.getMarketData("LTP", exchange_tokens)
-        if resp.get("status") and resp.get("data"):
-            for item in resp["data"].get("fetched", []):
-                token    = str(item.get("symbolToken", ""))
-                ltp      = item.get("ltp")
-                kite_sym = token_to_kite.get(token)
-                if kite_sym and ltp is not None:
-                    result[kite_sym] = float(ltp)
-                    logger.debug("getMarketData LTP: %s = %.2f", kite_sym, float(ltp))
-            for item in resp["data"].get("unfetched", []):
-                token    = str(item.get("symbolToken", ""))
-                kite_sym = token_to_kite.get(token, token)
-                logger.warning("getMarketData: could not fetch LTP for %s (token=%s)", kite_sym, token)
-        else:
-            logger.warning("getMarketData LTP failed: %s", resp.get("message", "unknown error"))
-    except Exception as exc:
-        logger.warning("getMarketData LTP exception: %s", exc)
+    for exch, tokens in exchange_tokens.items():
+        for chunk in _chunks(tokens, _ANGEL_LTP_CHUNK):
+            try:
+                time.sleep(config.ANGEL_LTP_DELAY)
+                resp = angel.getMarketData("LTP", {exch: chunk})
+                if resp.get("status") and resp.get("data"):
+                    for item in resp["data"].get("fetched", []):
+                        token    = str(item.get("symbolToken", ""))
+                        ltp      = item.get("ltp")
+                        kite_sym = token_to_kite.get(token)
+                        if kite_sym and ltp is not None:
+                            result[kite_sym] = float(ltp)
+                            logger.debug("getMarketData LTP: %s = %.2f", kite_sym, float(ltp))
+                    for item in resp["data"].get("unfetched", []):
+                        token    = str(item.get("symbolToken", ""))
+                        kite_sym = token_to_kite.get(token, token)
+                        logger.warning("getMarketData: could not fetch LTP for %s (token=%s)", kite_sym, token)
+                else:
+                    logger.warning("getMarketData LTP failed: %s", resp.get("message", "unknown error"))
+            except Exception as exc:
+                logger.warning("getMarketData LTP exception: %s", exc)
 
     return result
 
