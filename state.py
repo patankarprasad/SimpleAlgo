@@ -10,11 +10,14 @@ position_size:
 import json
 import logging
 import os
+import threading
 from pathlib import Path
 
 import config
 
 logger = logging.getLogger(__name__)
+
+_state_write_lock = threading.Lock()
 
 
 def load_state() -> dict:
@@ -26,12 +29,14 @@ def load_state() -> dict:
 
 
 def save_state(state: dict):
-    """Write atomically: write to .tmp then rename, so a crash never corrupts the file."""
-    target = config.STATE_FILE
-    tmp    = target + ".tmp"
-    with open(tmp, "w") as f:
-        json.dump(state, f, indent=2)
-    os.replace(tmp, target)
+    """Write atomically: write to .tmp then rename, so a crash never corrupts the file.
+    Thread-safe: a lock ensures concurrent saves don't interleave writes."""
+    with _state_write_lock:
+        target = config.STATE_FILE
+        tmp    = target + ".tmp"
+        with open(tmp, "w") as f:
+            json.dump(state, f, indent=2)
+        os.replace(tmp, target)
 
 
 def get_position(state: dict, instrument_name: str) -> int:

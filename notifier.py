@@ -238,6 +238,30 @@ def notify_paper_close(result: dict) -> None:
     logger.info("Telegram: paper trade close (%s P&L=%.2f)", result["name"], pnl)
 
 
+# ── Order rejection alerts ────────────────────────────────────────────────────
+
+def notify_order_rejected(
+    name: str,
+    action: str,
+    symbol: str,
+    exc_msg: str,
+) -> None:
+    """
+    Alert when a single-leg order is rejected or times out on Kite.
+    Position state is NOT updated — the algo will retry on the next signal.
+    """
+    time_str = datetime.now(IST).strftime("%H:%M:%S IST")
+    _send(
+        f"🚨 <b>ORDER REJECTED — {name}</b>\n\n"
+        f"Action:  <b>{action}</b>\n"
+        f"Symbol:  <code>{symbol}</code>\n"
+        f"Time:    {time_str}\n"
+        f"Reason:  {exc_msg}\n\n"
+        f"⛔ Position state NOT updated — algo will retry on next signal."
+    )
+    logger.error("Telegram: order rejected alert sent for %s %s %s", action, name, symbol)
+
+
 # ── Synthetic futures alerts ───────────────────────────────────────────────────
 
 def notify_synthetic_partial_fill(

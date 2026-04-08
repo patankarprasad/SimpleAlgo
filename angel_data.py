@@ -11,6 +11,7 @@ Angel interval strings:
   FIFTEEN_MINUTE, THIRTY_MINUTE, ONE_HOUR, ONE_DAY
 """
 import logging
+import threading
 import time
 from datetime import datetime, timedelta
 
@@ -20,6 +21,36 @@ import config
 from angel_login import force_relogin, get_angel_session
 
 logger = logging.getLogger(__name__)
+
+# ── Angel API rate limiter ─────────────────────────────────────────────────────
+# Serialises all Angel getCandleData calls across threads so that no more than
+# one call is issued per ANGEL_BASE_DELAY seconds, regardless of concurrency.
+_angel_call_lock      = threading.Lock()
+_angel_last_call_time = 0.0
+
+_angel_ltp_lock           = threading.Lock()
+_angel_ltp_last_call_time = 0.0
+
+
+def _angel_rate_limit() -> None:
+    """Block the calling thread until it is safe to issue an Angel getCandleData call."""
+    global _angel_last_call_time
+    with _angel_call_lock:
+        elapsed = time.monotonic() - _angel_last_call_time
+        if elapsed < config.ANGEL_BASE_DELAY:
+            time.sleep(config.ANGEL_BASE_DELAY - elapsed)
+        _angel_last_call_time = time.monotonic()
+
+
+def _angel_ltp_rate_limit() -> None:
+    """Block the calling thread until it is safe to issue an Angel getMarketData call."""
+    global _angel_ltp_last_call_time
+    with _angel_ltp_lock:
+        elapsed = time.monotonic() - _angel_ltp_last_call_time
+        if elapsed < config.ANGEL_LTP_DELAY:
+            time.sleep(config.ANGEL_LTP_DELAY - elapsed)
+        _angel_ltp_last_call_time = time.monotonic()
+
 
 # ── Candle retry configuration ─────────────────────────────────────────────────
 _CANDLE_MAX_RETRIES   = 5     # total attempts (1 initial + 4 retries)
@@ -105,7 +136,7 @@ def get_candles(instrument: dict, n_candles: int = None, interval: str = None) -
     retry_delay  = _CANDLE_RETRY_BASE
 
     for attempt in range(1, _CANDLE_MAX_RETRIES + 1):
-        time.sleep(config.ANGEL_BASE_DELAY)  # always honour rate limit before each call
+        _angel_rate_limit()  # always honour rate limit before each call
         try:
             resp = angel.getCandleData(params)
         except Exception as exc:
@@ -264,7 +295,7 @@ def get_option_ltps(options: list[dict]) -> dict[str, float]:
     for exch, tokens in exchange_tokens.items():
         for chunk in _chunks(tokens, _ANGEL_LTP_CHUNK):
             try:
-                time.sleep(config.ANGEL_LTP_DELAY)
+                _angel_ltp_rate_limit()
                 resp = angel.getMarketData("LTP", {exch: chunk})
                 if resp.get("status") and resp.get("data"):
                     for item in resp["data"].get("fetched", []):
