@@ -763,6 +763,12 @@ def positions():
         else:
             status = "-"
 
+        clear_btn = (
+            f'<form method="post" action="/positions/clear/{name}" style="margin:0"'
+            f' onsubmit="return confirm(\'Clear algo state for {name}? (No orders placed)\')">'
+            f'<button type="submit" class="btn-sm btn-warn-sm" style="padding:2px 8px;font-size:.72rem">&#128465;</button>'
+            f'</form>'
+        )
         rows += f"""<tr>
   <td><strong>{name}</strong></td>
   <td style="color:var(--muted);font-size:.78rem">{sym_display}</td>
@@ -773,6 +779,7 @@ def positions():
   <td style="text-align:right">{pnl_html}{src_note}</td>
   <td>{_pill(sig)}</td>
   <td>{status}</td>
+  <td>{clear_btn}</td>
 </tr>"""
 
     # ── Stats bar ──────────────────────────────────────────────────────────────
@@ -811,6 +818,9 @@ def positions():
         msg_banner = '<p style="color:var(--red-l);margin-bottom:12px">&#9888; Square-off failed — check log.</p>'
     elif msg == "cleared":
         msg_banner = '<p style="color:var(--green-l);margin-bottom:12px">&#10003; Position state cleared.</p>'
+    elif msg.startswith("cleared_"):
+        cleared_name = msg[len("cleared_"):]
+        msg_banner = f'<p style="color:var(--green-l);margin-bottom:12px">&#10003; Cleared state for {_html.escape(cleared_name)}.</p>'
     elif msg == "paper_cleared":
         msg_banner = '<p style="color:var(--green-l);margin-bottom:12px">&#10003; Paper positions cleared.</p>'
 
@@ -846,6 +856,7 @@ def positions():
       <th style="text-align:right">P&amp;L</th>
       <th>Signal</th>
       <th>Status</th>
+      <th></th>
     </tr></thead>
     <tbody>{rows}</tbody>
   </table>
@@ -989,6 +1000,18 @@ def positions_clear():
     save_state({})
     logger.info("Web UI: position state cleared")
     return redirect("/positions?msg=cleared")
+
+
+@app.route("/positions/clear/<name>", methods=["POST"])
+@login_required
+def positions_clear_one(name: str):
+    """Clear algo state for a single position (no orders placed)."""
+    state = load_state()
+    if name in state:
+        del state[name]
+        save_state(state)
+        logger.info("Web UI: cleared position state for %s", name)
+    return redirect(f"/positions?msg=cleared_{name}")
 
 
 @app.route("/positions/paper/clear", methods=["POST"])
