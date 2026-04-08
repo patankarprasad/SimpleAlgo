@@ -16,6 +16,7 @@ Usage
 
   Set DRY_RUN=true in .env for paper trading (no real orders placed).
 """
+import concurrent.futures
 import logging
 import sys
 from datetime import datetime, timedelta
@@ -675,17 +676,21 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         else:
             entry_sym, entry_exchange = sym, exchange
             try:
-                place_buy(kite, instrument)
-            except InputException as exc:
-                if not _is_tender_period_error(exc):
-                    raise
-                next_inst = _next_month_instrument(instrument)
-                place_buy(kite, next_inst)
-                entry_sym      = next_inst["kite_tradingsymbol"]
-                entry_exchange = next_inst["exchange"]
-            trade_log.log_trade(name, "BUY", entry_sym, order_qty)
-            notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
-            set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
+                try:
+                    place_buy(kite, instrument)
+                except InputException as exc:
+                    if not _is_tender_period_error(exc):
+                        raise
+                    next_inst = _next_month_instrument(instrument)
+                    place_buy(kite, next_inst)
+                    entry_sym      = next_inst["kite_tradingsymbol"]
+                    entry_exchange = next_inst["exchange"]
+                trade_log.log_trade(name, "BUY", entry_sym, order_qty)
+                notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
+                set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
+            except Exception as exc:
+                logger.error("%s: BUY order rejected/failed: %s", name, exc, exc_info=True)
+                notifier.notify_order_rejected(name, "BUY", entry_sym, str(exc))
 
     elif signal == "SELL" and pos == 0:
         if long_only:
@@ -713,17 +718,21 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         else:
             entry_sym, entry_exchange = sym, exchange
             try:
-                place_sell(kite, instrument)
-            except InputException as exc:
-                if not _is_tender_period_error(exc):
-                    raise
-                next_inst = _next_month_instrument(instrument)
-                place_sell(kite, next_inst)
-                entry_sym      = next_inst["kite_tradingsymbol"]
-                entry_exchange = next_inst["exchange"]
-            trade_log.log_trade(name, "SELL", entry_sym, order_qty)
-            notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
-            set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
+                try:
+                    place_sell(kite, instrument)
+                except InputException as exc:
+                    if not _is_tender_period_error(exc):
+                        raise
+                    next_inst = _next_month_instrument(instrument)
+                    place_sell(kite, next_inst)
+                    entry_sym      = next_inst["kite_tradingsymbol"]
+                    entry_exchange = next_inst["exchange"]
+                trade_log.log_trade(name, "SELL", entry_sym, order_qty)
+                notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
+                set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
+            except Exception as exc:
+                logger.error("%s: SELL order rejected/failed: %s", name, exc, exc_info=True)
+                notifier.notify_order_rejected(name, "SELL", entry_sym, str(exc))
 
     # SELL while long: exit the long, then also enter short (gap-down / signal flip).
     # EXIT_LONG: exit only.
@@ -771,24 +780,33 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             exit_sym = state.get(name, {}).get("kite_tradingsymbol") or sym
             if exit_sym != sym:
                 logger.info("%s: EXIT LONG using state symbol %s (resolved=%s)", name, exit_sym, sym)
-            close_long(kite, {**instrument, "kite_tradingsymbol": exit_sym})
-            trade_log.log_trade(name, "EXIT_LONG", exit_sym, order_qty)
-            notifier.notify_trade(name, "EXIT_LONG", exit_sym, order_qty, price)
-            set_position(state, name, 0)
-            if signal == "SELL" and not long_only:
-                entry_sym, entry_exchange = sym, exchange
-                try:
-                    place_sell(kite, instrument)
-                except InputException as exc:
-                    if not _is_tender_period_error(exc):
-                        raise
-                    next_inst = _next_month_instrument(instrument)
-                    place_sell(kite, next_inst)
-                    entry_sym      = next_inst["kite_tradingsymbol"]
-                    entry_exchange = next_inst["exchange"]
-                trade_log.log_trade(name, "SELL", entry_sym, order_qty)
-                notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
-                set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
+            try:
+                close_long(kite, {**instrument, "kite_tradingsymbol": exit_sym})
+            except Exception as exc:
+                logger.error("%s: EXIT LONG order rejected/failed: %s", name, exc, exc_info=True)
+                notifier.notify_order_rejected(name, "EXIT_LONG", exit_sym, str(exc))
+            else:
+                trade_log.log_trade(name, "EXIT_LONG", exit_sym, order_qty)
+                notifier.notify_trade(name, "EXIT_LONG", exit_sym, order_qty, price)
+                set_position(state, name, 0)
+                if signal == "SELL" and not long_only:
+                    entry_sym, entry_exchange = sym, exchange
+                    try:
+                        try:
+                            place_sell(kite, instrument)
+                        except InputException as exc:
+                            if not _is_tender_period_error(exc):
+                                raise
+                            next_inst = _next_month_instrument(instrument)
+                            place_sell(kite, next_inst)
+                            entry_sym      = next_inst["kite_tradingsymbol"]
+                            entry_exchange = next_inst["exchange"]
+                        trade_log.log_trade(name, "SELL", entry_sym, order_qty)
+                        notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
+                        set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
+                    except Exception as exc:
+                        logger.error("%s: SELL entry after EXIT_LONG rejected/failed: %s", name, exc, exc_info=True)
+                        notifier.notify_order_rejected(name, "SELL", entry_sym, str(exc))
 
     # BUY while short: exit the short, then also enter long (gap-up / signal flip).
     # EXIT_SHORT: exit only.
@@ -856,24 +874,33 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             exit_sym = state.get(name, {}).get("kite_tradingsymbol") or sym
             if exit_sym != sym:
                 logger.info("%s: EXIT SHORT using state symbol %s (resolved=%s)", name, exit_sym, sym)
-            close_short(kite, {**instrument, "kite_tradingsymbol": exit_sym})
-            trade_log.log_trade(name, "EXIT_SHORT", exit_sym, order_qty)
-            notifier.notify_trade(name, "EXIT_SHORT", exit_sym, order_qty, price)
-            set_position(state, name, 0)
-            if signal == "BUY":
-                entry_sym, entry_exchange = sym, exchange
-                try:
-                    place_buy(kite, instrument)
-                except InputException as exc:
-                    if not _is_tender_period_error(exc):
-                        raise
-                    next_inst = _next_month_instrument(instrument)
-                    place_buy(kite, next_inst)
-                    entry_sym      = next_inst["kite_tradingsymbol"]
-                    entry_exchange = next_inst["exchange"]
-                trade_log.log_trade(name, "BUY", entry_sym, order_qty)
-                notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
-                set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
+            try:
+                close_short(kite, {**instrument, "kite_tradingsymbol": exit_sym})
+            except Exception as exc:
+                logger.error("%s: EXIT SHORT order rejected/failed: %s", name, exc, exc_info=True)
+                notifier.notify_order_rejected(name, "EXIT_SHORT", exit_sym, str(exc))
+            else:
+                trade_log.log_trade(name, "EXIT_SHORT", exit_sym, order_qty)
+                notifier.notify_trade(name, "EXIT_SHORT", exit_sym, order_qty, price)
+                set_position(state, name, 0)
+                if signal == "BUY":
+                    entry_sym, entry_exchange = sym, exchange
+                    try:
+                        try:
+                            place_buy(kite, instrument)
+                        except InputException as exc:
+                            if not _is_tender_period_error(exc):
+                                raise
+                            next_inst = _next_month_instrument(instrument)
+                            place_buy(kite, next_inst)
+                            entry_sym      = next_inst["kite_tradingsymbol"]
+                            entry_exchange = next_inst["exchange"]
+                        trade_log.log_trade(name, "BUY", entry_sym, order_qty)
+                        notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
+                        set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
+                    except Exception as exc:
+                        logger.error("%s: BUY entry after EXIT_SHORT rejected/failed: %s", name, exc, exc_info=True)
+                        notifier.notify_order_rejected(name, "BUY", entry_sym, str(exc))
 
     else:
         logger.info("%s: no action (signal=%s, pos=%d)", name, signal, pos)
@@ -906,11 +933,17 @@ def run_hourly_strategy(exchange: str | None = None):
         else RESOLVED_HOURLY_INSTRUMENTS
     )
 
-    for instrument in instruments:
-        try:
-            _process_instrument(kite, state, instrument, now_ist)
-        except Exception as exc:
-            logger.error("Error processing %s: %s", instrument["name"], exc, exc_info=True)
+    max_workers = min(len(instruments), 8) if instruments else 1
+    with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = {
+            pool.submit(_process_instrument, kite, state, instrument, now_ist): instrument["name"]
+            for instrument in instruments
+        }
+        for future in concurrent.futures.as_completed(futures):
+            name = futures[future]
+            exc  = future.exception()
+            if exc:
+                logger.error("Error processing %s: %s", name, exc, exc_info=exc)
 
 
 # ── Scheduler ─────────────────────────────────────────────────────────────────

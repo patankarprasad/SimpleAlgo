@@ -12,6 +12,7 @@ Order quantity sent to Kite = qty × lot_size
 All orders are MARKET orders.
 """
 import logging
+import time
 
 from kiteconnect import KiteConnect
 
@@ -37,6 +38,72 @@ def _order_qty(instrument: dict) -> int:
     return instrument["qty"] * instrument["lot_size"]
 
 
+def _await_order_complete(
+    kite: KiteConnect,
+    order_id: str,
+    label: str,
+    *,
+    retries: int = 8,
+    delay: float = 0.5,
+) -> None:
+    """
+    Poll Kite order history until the order reaches a terminal status.
+
+    For MARKET orders this normally resolves in < 1 s; we allow up to
+    retries × delay seconds before giving up.
+
+    Raises RuntimeError if:
+      - order status is REJECTED or CANCELLED, or
+      - COMPLETE is not seen within the retry window.
+    """
+    terminal_ok  = {"COMPLETE"}
+    terminal_bad = {"REJECTED", "CANCELLED"}
+
+    for attempt in range(retries):
+        try:
+            history = kite.order_history(order_id)
+            if history:
+                last   = history[-1]
+                status = last.get("status", "")
+                if status in terminal_ok:
+                    logger.info(
+                        "Order COMPLETE | %s | order_id=%s | avg_price=%.4f | filled=%d",
+                        label, order_id,
+                        last.get("average_price", 0.0),
+                        last.get("filled_quantity", 0),
+                    )
+                    return
+                if status in terminal_bad:
+                    reason = (
+                        last.get("status_message")
+                        or last.get("status_message_raw")
+                        or status
+                    )
+                    raise RuntimeError(
+                        f"Order {status} for {label} (id={order_id}): {reason}"
+                    )
+                # Still OPEN / TRIGGER PENDING — keep polling
+                logger.debug(
+                    "Order status=%s, waiting… (attempt %d/%d) | %s",
+                    status, attempt + 1, retries, label,
+                )
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.warning(
+                "order_history poll failed (attempt %d/%d) for %s [id=%s]: %s",
+                attempt + 1, retries, label, order_id, exc,
+            )
+
+        if attempt < retries - 1:
+            time.sleep(delay)
+
+    raise RuntimeError(
+        f"Order {order_id} for {label} did not reach COMPLETE within "
+        f"{retries * delay:.1f}s — check Kite manually"
+    )
+
+
 def place_buy(kite: KiteConnect, instrument: dict) -> str:
     """Open a long (BUY) position."""
     if kite is None:
@@ -55,6 +122,7 @@ def place_buy(kite: KiteConnect, instrument: dict) -> str:
         "BUY order placed | %s | symbol=%s | qty=%d | order_id=%s",
         instrument["name"], instrument["kite_tradingsymbol"], qty, order_id,
     )
+    _await_order_complete(kite, order_id, f"{instrument['name']} BUY {instrument['kite_tradingsymbol']}")
     return order_id
 
 
@@ -76,6 +144,7 @@ def place_sell(kite: KiteConnect, instrument: dict) -> str:
         "SELL order placed | %s | symbol=%s | qty=%d | order_id=%s",
         instrument["name"], instrument["kite_tradingsymbol"], qty, order_id,
     )
+    _await_order_complete(kite, order_id, f"{instrument['name']} SELL {instrument['kite_tradingsymbol']}")
     return order_id
 
 
@@ -97,6 +166,7 @@ def close_long(kite: KiteConnect, instrument: dict) -> str:
         "EXIT LONG order placed | %s | symbol=%s | qty=%d | order_id=%s",
         instrument["name"], instrument["kite_tradingsymbol"], qty, order_id,
     )
+    _await_order_complete(kite, order_id, f"{instrument['name']} EXIT_LONG {instrument['kite_tradingsymbol']}")
     return order_id
 
 
@@ -118,6 +188,7 @@ def close_short(kite: KiteConnect, instrument: dict) -> str:
         "EXIT SHORT order placed | %s | symbol=%s | qty=%d | order_id=%s",
         instrument["name"], instrument["kite_tradingsymbol"], qty, order_id,
     )
+    _await_order_complete(kite, order_id, f"{instrument['name']} EXIT_SHORT {instrument['kite_tradingsymbol']}")
     return order_id
 
 
@@ -182,6 +253,11 @@ def place_synthetic_buy(
         "Synthetic BUY CE placed | %s | symbol=%s | qty=%d | order_id=%s",
         instrument["name"], ce_info["kite_tradingsymbol"], qty, ce_order_id,
     )
+    # Verify leg 1 filled before risking a partial fill on leg 2
+    _await_order_complete(
+        kite, ce_order_id,
+        f"{instrument['name']} Synthetic BUY CE {ce_info['kite_tradingsymbol']}",
+    )
 
     # Leg 2: SELL PE
     try:
@@ -197,6 +273,10 @@ def place_synthetic_buy(
         logger.info(
             "Synthetic BUY PE (SELL) placed | %s | symbol=%s | qty=%d | order_id=%s",
             instrument["name"], pe_info["kite_tradingsymbol"], qty, pe_order_id,
+        )
+        _await_order_complete(
+            kite, pe_order_id,
+            f"{instrument['name']} Synthetic SELL PE {pe_info['kite_tradingsymbol']}",
         )
     except Exception as exc:
         logger.critical(
@@ -249,6 +329,11 @@ def place_synthetic_sell(
         "Synthetic SELL PE (BUY) placed | %s | symbol=%s | qty=%d | order_id=%s",
         instrument["name"], pe_info["kite_tradingsymbol"], qty, pe_order_id,
     )
+    # Verify leg 1 filled before risking a partial fill on leg 2
+    _await_order_complete(
+        kite, pe_order_id,
+        f"{instrument['name']} Synthetic BUY PE {pe_info['kite_tradingsymbol']}",
+    )
 
     # Leg 2: SELL CE
     ce_order_id = None
@@ -265,6 +350,10 @@ def place_synthetic_sell(
         logger.info(
             "Synthetic SELL CE (SELL) placed | %s | symbol=%s | qty=%d | order_id=%s",
             instrument["name"], ce_info["kite_tradingsymbol"], qty, ce_order_id,
+        )
+        _await_order_complete(
+            kite, ce_order_id,
+            f"{instrument['name']} Synthetic SELL CE {ce_info['kite_tradingsymbol']}",
         )
     except Exception as exc:
         logger.critical(
@@ -317,6 +406,11 @@ def close_synthetic_long(
         "Synthetic EXIT LONG SELL CE | %s | symbol=%s | order_id=%s",
         instrument["name"], ce_symbol, ce_order_id,
     )
+    # Verify leg 1 filled before risking a partial fill on leg 2
+    _await_order_complete(
+        kite, ce_order_id,
+        f"{instrument['name']} Synthetic EXIT_LONG SELL CE {ce_symbol}",
+    )
 
     # Leg 2: BUY PE
     try:
@@ -332,6 +426,10 @@ def close_synthetic_long(
         logger.info(
             "Synthetic EXIT LONG BUY PE | %s | symbol=%s | order_id=%s",
             instrument["name"], pe_symbol, pe_order_id,
+        )
+        _await_order_complete(
+            kite, pe_order_id,
+            f"{instrument['name']} Synthetic EXIT_LONG BUY PE {pe_symbol}",
         )
     except Exception as exc:
         logger.critical(
@@ -381,6 +479,11 @@ def close_synthetic_short(
         "Synthetic EXIT SHORT SELL PE | %s | symbol=%s | order_id=%s",
         instrument["name"], pe_symbol, pe_order_id,
     )
+    # Verify leg 1 filled before risking a partial fill on leg 2
+    _await_order_complete(
+        kite, pe_order_id,
+        f"{instrument['name']} Synthetic EXIT_SHORT SELL PE {pe_symbol}",
+    )
 
     # Leg 2: BUY CE
     try:
@@ -396,6 +499,10 @@ def close_synthetic_short(
         logger.info(
             "Synthetic EXIT SHORT BUY CE | %s | symbol=%s | order_id=%s",
             instrument["name"], ce_symbol, ce_order_id,
+        )
+        _await_order_complete(
+            kite, ce_order_id,
+            f"{instrument['name']} Synthetic EXIT_SHORT BUY CE {ce_symbol}",
         )
     except Exception as exc:
         logger.critical(
@@ -444,6 +551,10 @@ def place_short_ce(
         instrument["name"], ce_info["kite_tradingsymbol"],
         ce_info.get("strike", "?"), qty, order_id,
     )
+    _await_order_complete(
+        kite, order_id,
+        f"{instrument['name']} Short CE SELL {ce_info['kite_tradingsymbol']}",
+    )
 
     # Fetch entry LTP immediately after order placement
     ce_key = f"{exchange}:{ce_info['kite_tradingsymbol']}"
@@ -487,6 +598,10 @@ def close_short_ce(
     logger.info(
         "Short CE BUY-back placed | %s | symbol=%s | qty=%d | order_id=%s",
         instrument["name"], ce_symbol, qty, order_id,
+    )
+    _await_order_complete(
+        kite, order_id,
+        f"{instrument['name']} Short CE BUY-back {ce_symbol}",
     )
 
     ce_key = f"{exchange}:{ce_symbol}"
