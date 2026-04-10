@@ -78,6 +78,7 @@ def initialise():
 
     logger.info("Refreshing scrip masters ...")
     scrip_master.refresh_masters()
+    scrip_master.warmup()
 
     RESOLVED_INSTRUMENTS = []
     for inst_def in config.INSTRUMENTS:
