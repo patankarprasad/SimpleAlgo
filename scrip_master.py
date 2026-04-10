@@ -315,6 +315,12 @@ def refresh_masters(force: bool = False):
     logger.info("Scrip masters refreshed and cached.")
 
 
+def warmup():
+    """Pre-build in-memory DataFrames so first strategy access has no delay."""
+    _get_merged()
+    _get_options()
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 # Internal helpers
 # ══════════════════════════════════════════════════════════════════════════════

@@ -9,6 +9,7 @@ Configure in .env:
   TELEGRAM_CHAT_ID=<your chat id>
   SERVER_BASE_URL=http://<vps-ip>:8880   (used in login reminder link)
 """
+import json
 import logging
 from datetime import date, datetime
 from pathlib import Path
@@ -55,11 +56,32 @@ def _send(text: str) -> bool:
 
 # ── Scheduled notifications ────────────────────────────────────────────────────
 
+def _is_weekend() -> bool:
+    """Return True if today is Saturday or Sunday."""
+    return date.today().weekday() >= 5  # 5=Saturday, 6=Sunday
+
+
+def _kite_logged_in() -> bool:
+    """Return True if a valid Kite token for today is already cached."""
+    try:
+        data = json.loads(Path(config.KITE_TOKEN_FILE).read_text())
+        return data.get("date") == str(date.today()) and bool(data.get("access_token"))
+    except Exception:
+        return False
+
+
 def notify_login_reminder() -> None:
     """
     8:30 AM daily reminder to log in to Kite.
-    Includes a direct link to the auth server login page.
+    Skipped on weekends (when TRADING_DAYS_ONLY=true) or if already logged in.
     """
+    if config.TRADING_DAYS_ONLY and _is_weekend():
+        logger.info("Telegram: login reminder skipped (weekend)")
+        return
+    if _kite_logged_in():
+        logger.info("Telegram: login reminder skipped (already logged in)")
+        return
+
     base      = (config.SERVER_BASE_URL or "").rstrip("/")
     login_url = f"{base}/kite/login" if base else f"http://your-vps-ip:{config.KITE_AUTH_PORT}/kite/login"
 
@@ -78,14 +100,18 @@ def notify_strategy_start(resolved_instruments: list, startup: bool = False,
     """
     Status message — trading mode, Kite token validity + active instruments.
     Called at server startup (startup=True) and daily at 9:00 AM.
+    The scheduled 9:00 AM call is skipped on weekends when TRADING_DAYS_ONLY=true.
     """
+    if not startup and config.TRADING_DAYS_ONLY and _is_weekend():
+        logger.info("Telegram: morning status skipped (weekend)")
+        return
+
     import strategy_config as stcfg
 
     # Check token validity by reading the cache file directly
     tok_valid = False
     try:
         cache = Path(config.KITE_TOKEN_FILE).read_text()
-        import json
         data = json.loads(cache)
         tok_valid = data.get("date") == str(date.today()) and bool(data.get("access_token"))
     except Exception:

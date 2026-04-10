@@ -55,7 +55,8 @@ ST2_FACTOR   = 3.0
 MA_LENGTH    = 50
 
 CANDLE_LOOKBACK = 200
-DRY_RUN         = os.getenv("DRY_RUN", "false").strip().lower() == "true"
+DRY_RUN             = os.getenv("DRY_RUN", "false").strip().lower() == "true"
+TRADING_DAYS_ONLY   = os.getenv("TRADING_DAYS_ONLY", "true").strip().lower() == "true"
 
 # ── Instruments ────────────────────────────────────────────────────────────────
 # Minimal static config – no hardcoded tokens or expiry-specific symbols.
