@@ -19,6 +19,11 @@ from kiteconnect import KiteConnect
 logger = logging.getLogger(__name__)
 
 
+def _is_circuit_limit_error(exc: Exception) -> bool:
+    """Return True if the exception is a circuit-limit rejection from the exchange."""
+    return "circuit" in str(exc).lower()
+
+
 def _place_order(kite: KiteConnect, **kwargs) -> str:
     """
     Call the Kite order placement API with market_protection=-1 injected.
@@ -105,47 +110,73 @@ def _await_order_complete(
 
 
 def place_buy(kite: KiteConnect, instrument: dict) -> str:
-    """Open a long (BUY) position."""
+    """Open a long (BUY) position. Retries once on circuit-limit rejection."""
     if kite is None:
         raise RuntimeError(f"Kite session unavailable — BUY order not placed for {instrument['name']}")
-    qty      = _order_qty(instrument)
-    order_id = _place_order(kite,
-        variety           = kite.VARIETY_REGULAR,
-        exchange          = instrument["exchange"],
-        tradingsymbol     = instrument["kite_tradingsymbol"],
-        transaction_type  = kite.TRANSACTION_TYPE_BUY,
-        quantity          = qty,
-        order_type        = kite.ORDER_TYPE_MARKET,
-        product           = instrument["product"],
-    )
-    logger.info(
-        "BUY order placed | %s | symbol=%s | qty=%d | order_id=%s",
-        instrument["name"], instrument["kite_tradingsymbol"], qty, order_id,
-    )
-    _await_order_complete(kite, order_id, f"{instrument['name']} BUY {instrument['kite_tradingsymbol']}")
-    return order_id
+    qty   = _order_qty(instrument)
+    label = f"{instrument['name']} BUY {instrument['kite_tradingsymbol']}"
+
+    for attempt in range(2):
+        order_id = _place_order(kite,
+            variety           = kite.VARIETY_REGULAR,
+            exchange          = instrument["exchange"],
+            tradingsymbol     = instrument["kite_tradingsymbol"],
+            transaction_type  = kite.TRANSACTION_TYPE_BUY,
+            quantity          = qty,
+            order_type        = kite.ORDER_TYPE_MARKET,
+            product           = instrument["product"],
+        )
+        logger.info(
+            "BUY order placed | %s | symbol=%s | qty=%d | order_id=%s",
+            instrument["name"], instrument["kite_tradingsymbol"], qty, order_id,
+        )
+        try:
+            _await_order_complete(kite, order_id, label)
+            return order_id
+        except RuntimeError as exc:
+            if attempt == 0 and _is_circuit_limit_error(exc):
+                logger.warning(
+                    "%s: BUY rejected due to circuit limits — retrying once in 2s: %s",
+                    instrument["name"], exc,
+                )
+                time.sleep(2)
+                continue
+            raise
 
 
 def place_sell(kite: KiteConnect, instrument: dict) -> str:
-    """Open a short (SELL) position."""
+    """Open a short (SELL) position. Retries once on circuit-limit rejection."""
     if kite is None:
         raise RuntimeError(f"Kite session unavailable — SELL order not placed for {instrument['name']}")
-    qty      = _order_qty(instrument)
-    order_id = _place_order(kite,
-        variety           = kite.VARIETY_REGULAR,
-        exchange          = instrument["exchange"],
-        tradingsymbol     = instrument["kite_tradingsymbol"],
-        transaction_type  = kite.TRANSACTION_TYPE_SELL,
-        quantity          = qty,
-        order_type        = kite.ORDER_TYPE_MARKET,
-        product           = instrument["product"],
-    )
-    logger.info(
-        "SELL order placed | %s | symbol=%s | qty=%d | order_id=%s",
-        instrument["name"], instrument["kite_tradingsymbol"], qty, order_id,
-    )
-    _await_order_complete(kite, order_id, f"{instrument['name']} SELL {instrument['kite_tradingsymbol']}")
-    return order_id
+    qty   = _order_qty(instrument)
+    label = f"{instrument['name']} SELL {instrument['kite_tradingsymbol']}"
+
+    for attempt in range(2):
+        order_id = _place_order(kite,
+            variety           = kite.VARIETY_REGULAR,
+            exchange          = instrument["exchange"],
+            tradingsymbol     = instrument["kite_tradingsymbol"],
+            transaction_type  = kite.TRANSACTION_TYPE_SELL,
+            quantity          = qty,
+            order_type        = kite.ORDER_TYPE_MARKET,
+            product           = instrument["product"],
+        )
+        logger.info(
+            "SELL order placed | %s | symbol=%s | qty=%d | order_id=%s",
+            instrument["name"], instrument["kite_tradingsymbol"], qty, order_id,
+        )
+        try:
+            _await_order_complete(kite, order_id, label)
+            return order_id
+        except RuntimeError as exc:
+            if attempt == 0 and _is_circuit_limit_error(exc):
+                logger.warning(
+                    "%s: SELL rejected due to circuit limits — retrying once in 2s: %s",
+                    instrument["name"], exc,
+                )
+                time.sleep(2)
+                continue
+            raise
 
 
 def close_long(kite: KiteConnect, instrument: dict) -> str:
