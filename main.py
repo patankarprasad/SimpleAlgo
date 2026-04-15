@@ -480,11 +480,13 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
     order_qty = instrument["qty"] * instrument["lot_size"]
     pnl_qty   = instrument["qty"] * instrument.get("contract_size", instrument["lot_size"])
 
-    sym          = instrument["kite_tradingsymbol"]
-    exchange     = instrument["exchange"]
-    is_synthetic = instrument.get("mode") == "SYNTHETIC"
-    strike_step  = instrument.get("strike_step", 50)
-    expiry_date  = instrument.get("expiry")          # datetime.date from resolve_instrument
+    sym            = instrument["kite_tradingsymbol"]
+    exchange       = instrument["exchange"]
+    is_synthetic   = instrument.get("mode") == "SYNTHETIC"
+    strike_step    = instrument.get("strike_step", 50)
+    expiry_date    = instrument.get("expiry")          # datetime.date from resolve_instrument
+    # For options lookup, hourly instruments use "underlying" (e.g. "NIFTY"), not name ("NIFTY_H")
+    options_name   = instrument.get("underlying", name)
 
     price = float(close_price)
 
@@ -496,7 +498,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             if is_synthetic:
                 try:
                     ce_info, pe_info = scrip_master.get_atm_options(
-                        name, exchange, price, strike_step, expiry_date
+                        options_name, exchange, price, strike_step, expiry_date
                     )
                     ce_ltp, pe_ltp = _fetch_option_ltps_safe(ce_info, pe_info)
                     if ce_ltp == 0.0 or pe_ltp == 0.0:
@@ -542,7 +544,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 try:
                     target_premium = instrument.get("short_ce_target_premium", 300)
                     ce_info, ce_ltp = _find_ce_for_short(
-                        name, exchange, expiry_date, price, strike_step, target_premium
+                        options_name, exchange, expiry_date, price, strike_step, target_premium
                     )
                     if ce_ltp == 0.0:
                         raise RuntimeError(
@@ -652,7 +654,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
         if is_synthetic:
             try:
                 ce_info, pe_info = scrip_master.get_atm_options(
-                    name, exchange, price, strike_step, expiry_date
+                    options_name, exchange, price, strike_step, expiry_date
                 )
                 ce_oid, pe_oid, ce_ltp, pe_ltp = place_synthetic_buy(
                     kite, instrument, ce_info, pe_info
@@ -701,7 +703,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             try:
                 target_premium = instrument.get("short_ce_target_premium", 300)
                 ce_info, ce_ltp = _find_ce_for_short(
-                    name, exchange, expiry_date, price, strike_step, target_premium
+                    options_name, exchange, expiry_date, price, strike_step, target_premium
                 )
                 ce_oid, entry_ce_ltp = place_short_ce(kite, instrument, ce_info)
                 trade_log.log_trade(name, "SELL_CE", ce_info["kite_tradingsymbol"], order_qty)
@@ -760,7 +762,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 try:
                     target_premium = instrument.get("short_ce_target_premium", 300)
                     ce_info, ce_ltp = _find_ce_for_short(
-                        name, exchange, expiry_date, price, strike_step, target_premium
+                        options_name, exchange, expiry_date, price, strike_step, target_premium
                     )
                     ce_oid, entry_ce_ltp = place_short_ce(kite, instrument, ce_info)
                     trade_log.log_trade(name, "SELL_CE", ce_info["kite_tradingsymbol"], order_qty)
@@ -847,7 +849,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
             if signal == "BUY" and _exit_ok:
                 try:
                     ce_info, pe_info = scrip_master.get_atm_options(
-                        name, exchange, price, strike_step, expiry_date
+                        options_name, exchange, price, strike_step, expiry_date
                     )
                     ce_oid, pe_oid, ce_ltp, pe_ltp = place_synthetic_buy(
                         kite, instrument, ce_info, pe_info
