@@ -205,6 +205,31 @@ HOURLY_INSTRUMENTS = [
     },
 ]
 
+# ── Stock Futures ──────────────────────────────────────────────────────────────
+# Comma-separated list of NSE stock names whose nearest futures contract should
+# be traded with the same supertrend + MA strategy.
+# Example: STOCK_FUTURES=RELIANCE,HDFCBANK,TCS
+# Each stock is treated as a plain futures instrument (no SYNTHETIC mode).
+# STOCK_FUTURES_QTY    – number of lots per stock (default 1)
+# STOCK_FUTURES_PRODUCT – NRML (positional/overnight) or MIS (intraday)
+_raw_stocks = os.getenv("STOCK_FUTURES", "").strip()
+STOCK_FUTURES_NAMES   = [s.strip().upper() for s in _raw_stocks.split(",") if s.strip()]
+STOCK_FUTURES_QTY     = int(os.getenv("STOCK_FUTURES_QTY", "1"))
+STOCK_FUTURES_PRODUCT = os.getenv("STOCK_FUTURES_PRODUCT", "NRML")
+
+STOCK_INSTRUMENTS = [
+    {
+        "name":        name,
+        "exchange":    "NFO",
+        "qty":         STOCK_FUTURES_QTY,
+        "product":     STOCK_FUTURES_PRODUCT,
+        "trade_start": "09:15",
+        "trade_end":   "15:30",
+        "timeframe":   "FIFTEEN_MINUTE",
+    }
+    for name in STOCK_FUTURES_NAMES
+]
+
 # ── Session token cache paths ──────────────────────────────────────────────────
 KITE_TOKEN_FILE    = "kite_token.json"
 ANGEL_TOKEN_FILE   = "angel_token.json"
