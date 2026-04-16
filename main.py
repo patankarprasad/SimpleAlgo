@@ -61,6 +61,7 @@ IST    = pytz.timezone("Asia/Kolkata")
 # ── Globals ────────────────────────────────────────────────────────────────────
 RESOLVED_INSTRUMENTS: list[dict] = []
 RESOLVED_HOURLY_INSTRUMENTS: list[dict] = []
+RESOLVED_STOCK_INSTRUMENTS: list[dict] = []
 DRY_RUN: bool = False
 
 
@@ -74,7 +75,7 @@ def initialise():
     - Build hourly instrument variants by inheriting tokens from base instruments.
     - Log the active contracts so you can verify expiry dates.
     """
-    global RESOLVED_INSTRUMENTS, RESOLVED_HOURLY_INSTRUMENTS
+    global RESOLVED_INSTRUMENTS, RESOLVED_HOURLY_INSTRUMENTS, RESOLVED_STOCK_INSTRUMENTS
 
     logger.info("Refreshing scrip masters ...")
     scrip_master.refresh_masters()
@@ -142,7 +143,35 @@ def initialise():
                     spot_name, inst["name"], exc,
                 )
 
-    web_state.set_resolved_instruments(RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS)
+    # Resolve stock futures instruments (loaded from STOCK_FUTURES env var).
+    # These are plain NFO FUTSTK contracts — same signals as MCX futures, no
+    # SYNTHETIC mode.  Processed after indices and MCX in run_strategy().
+    RESOLVED_STOCK_INSTRUMENTS = []
+    for inst_def in config.STOCK_INSTRUMENTS:
+        try:
+            resolved = scrip_master.resolve_instrument(inst_def)
+            RESOLVED_STOCK_INSTRUMENTS.append(resolved)
+            logger.info(
+                "  %-12s | angel=%-22s (token %s) | kite=%-22s | expiry=%s | lot=%d  [STOCK FUT]",
+                resolved["name"],
+                resolved["angel_symbol"],
+                resolved["angel_token"],
+                resolved["kite_tradingsymbol"],
+                resolved["expiry"],
+                resolved["lot_size"],
+            )
+        except Exception as exc:
+            logger.error("Failed to resolve stock future %s: %s", inst_def["name"], exc)
+
+    if config.STOCK_INSTRUMENTS and not RESOLVED_STOCK_INSTRUMENTS:
+        logger.warning(
+            "STOCK_FUTURES configured but none could be resolved. "
+            "Check stock names in STOCK_FUTURES env var."
+        )
+
+    web_state.set_resolved_instruments(
+        RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS + RESOLVED_STOCK_INSTRUMENTS
+    )
 
 
 def re_resolve_instrument(name: str) -> bool:
@@ -186,7 +215,7 @@ def _check_rollover():
     risks trading the wrong contract. Human confirmation is required.
     """
     state = load_state()
-    for inst in RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS:
+    for inst in RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS + RESOLVED_STOCK_INSTRUMENTS:
         name    = inst["name"]
         new_sym = inst["kite_tradingsymbol"]
         saved   = state.get(name, {})
@@ -231,6 +260,14 @@ def run_strategy():
             _process_instrument(kite, state, instrument, now_ist)
         except Exception as exc:
             logger.error("Error processing %s: %s", instrument["name"], exc, exc_info=True)
+
+    # Stock futures run after indices/MCX so that index signals are already
+    # logged before the (potentially longer) stock loop begins.
+    for instrument in RESOLVED_STOCK_INSTRUMENTS:
+        try:
+            _process_instrument(kite, state, instrument, now_ist)
+        except Exception as exc:
+            logger.error("Error processing stock future %s: %s", instrument["name"], exc, exc_info=True)
 
 
 def _is_tender_period_error(exc: Exception) -> bool:
