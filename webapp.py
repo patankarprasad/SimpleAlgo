@@ -403,10 +403,13 @@ def dashboard():
     hourly_names   = [i["name"] for i in config.HOURLY_INSTRUMENTS]
     hourly_enabled = stcfg.get_all(hourly_names)
 
+    stock_names    = [i["name"] for i in config.STOCK_INSTRUMENTS]
+    stock_enabled  = stcfg.get_all(stock_names)
+
     # Build name → exchange/mode lookup and load all active pins
-    inst_exchange  = {i["name"]: i["exchange"] for i in config.INSTRUMENTS + config.HOURLY_INSTRUMENTS}
-    inst_synthetic = {i["name"] for i in config.INSTRUMENTS + config.HOURLY_INSTRUMENTS
-                      if i.get("mode") == "SYNTHETIC"}
+    all_inst_defs  = config.INSTRUMENTS + config.HOURLY_INSTRUMENTS + config.STOCK_INSTRUMENTS
+    inst_exchange  = {i["name"]: i["exchange"] for i in all_inst_defs}
+    inst_synthetic = {i["name"] for i in all_inst_defs if i.get("mode") == "SYNTHETIC"}
     all_pins       = contract_pin.list_pins()
 
     # Instrument cards — show all configured instruments, even before first candle
@@ -430,6 +433,22 @@ def dashboard():
         )
         for name in hourly_names
     )
+    stock_cards = "".join(
+        _make_card(
+            name, instruments.get(name, {}), state,
+            stock_enabled.get(name, True),
+            exchange=inst_exchange.get(name, "NFO"),
+            pin=all_pins.get(name.upper()),
+            show_rollover=True,
+        )
+        for name in stock_names
+    )
+
+    stock_section = ""
+    if stock_names:
+        stock_section = f"""
+  <h2 style="margin-top:24px">Stock Futures (15M)</h2>
+  <div class="grid">{stock_cards}</div>"""
 
     body = f"""
 <div class="content">
@@ -441,7 +460,7 @@ def dashboard():
   <h2>15-Minute Strategies</h2>
   <div class="grid">{cards}</div>
   <h2 style="margin-top:24px">Hourly Strategies (1H)</h2>
-  <div class="grid">{hourly_cards}</div>
+  <div class="grid">{hourly_cards}</div>{stock_section}
 </div>
 <script>
 (function(){{
