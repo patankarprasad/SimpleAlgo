@@ -109,6 +109,36 @@ INSTRUMENTS = [
         "timeframe":     "FIFTEEN_MINUTE",
     },
     {
+        "name":          "NATURALGAS",
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 1250,      # 1250 MMBTU/lot — PnL multiplier only (Kite order qty stays 1)
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
+        "timeframe":     "FIFTEEN_MINUTE",
+    },
+    {
+        "name":          "COPPER",
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 2500,      # 2500 kg/lot — PnL multiplier only (Kite order qty stays 1)
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
+        "timeframe":     "FIFTEEN_MINUTE",
+    },
+    {
+        "name":          "ZINC",
+        "exchange":      "MCX",
+        "qty":           1,
+        "contract_size": 5000,      # 5000 kg/lot — PnL multiplier only (Kite order qty stays 1)
+        "product":       "NRML",
+        "trade_start":   "09:00",
+        "trade_end":     "23:30",
+        "timeframe":     "FIFTEEN_MINUTE",
+    },
+    {
         "name":                  "NIFTY",
         "exchange":              "NFO",
         "qty":                   1,           # lot_size resolved from scrip master
