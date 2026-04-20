@@ -141,7 +141,7 @@ INSTRUMENTS = [
     {
         "name":                  "NIFTY",
         "exchange":              "NFO",
-        "qty":                   1,           # lot_size resolved from scrip master
+        "qty":                   2,           # lot_size resolved from scrip master
         "product":               "NRML",
         "trade_start":           "09:15",
         "trade_end":             "15:30",
