@@ -176,31 +176,45 @@ def initialise():
 
 def re_resolve_instrument(name: str) -> bool:
     """
-    Re-resolve a single instrument in RESOLVED_INSTRUMENTS (e.g. after a pin change).
+    Re-resolve a single instrument by name (e.g. after a pin change).
+    Searches RESOLVED_INSTRUMENTS, RESOLVED_STOCK_INSTRUMENTS, and
+    RESOLVED_HOURLY_INSTRUMENTS in order.
     Returns True if the instrument was found and updated, False if not found.
     """
-    global RESOLVED_INSTRUMENTS
-    idx = next((i for i, inst in enumerate(RESOLVED_INSTRUMENTS) if inst["name"] == name), None)
-    if idx is None:
-        logger.warning("re_resolve_instrument: %s not found in RESOLVED_INSTRUMENTS", name)
-        return False
-    inst_def = {k: v for k, v in RESOLVED_INSTRUMENTS[idx].items()
-                if k in ("name", "exchange", "qty", "lot_size", "contract_size",
-                         "timeframe", "trade_start", "trade_end", "product",
-                         "long_only", "mode", "strike_step", "short_ce_target_premium",
-                         "spot_index_name")}
-    try:
-        resolved = scrip_master.resolve_instrument(inst_def)
-        RESOLVED_INSTRUMENTS[idx] = resolved
-        web_state.set_resolved_instruments(RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS)
-        logger.info(
-            "re_resolve_instrument: %s → %s (expiry %s)",
-            name, resolved["kite_tradingsymbol"], resolved.get("expiry"),
-        )
-        return True
-    except Exception as exc:
-        logger.error("re_resolve_instrument: failed to re-resolve %s: %s", name, exc)
-        return False
+    global RESOLVED_INSTRUMENTS, RESOLVED_STOCK_INSTRUMENTS, RESOLVED_HOURLY_INSTRUMENTS
+
+    _STRIP_KEYS = (
+        "name", "exchange", "qty", "lot_size", "contract_size",
+        "timeframe", "trade_start", "trade_end", "product",
+        "long_only", "mode", "strike_step", "short_ce_target_premium",
+        "spot_index_name",
+    )
+
+    for bucket, label in (
+        (RESOLVED_INSTRUMENTS,       "RESOLVED_INSTRUMENTS"),
+        (RESOLVED_STOCK_INSTRUMENTS, "RESOLVED_STOCK_INSTRUMENTS"),
+    ):
+        idx = next((i for i, inst in enumerate(bucket) if inst["name"] == name), None)
+        if idx is None:
+            continue
+        inst_def = {k: v for k, v in bucket[idx].items() if k in _STRIP_KEYS}
+        try:
+            resolved   = scrip_master.resolve_instrument(inst_def)
+            bucket[idx] = resolved
+            web_state.set_resolved_instruments(
+                RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS + RESOLVED_STOCK_INSTRUMENTS
+            )
+            logger.info(
+                "re_resolve_instrument: %s → %s (expiry %s) [%s]",
+                name, resolved["kite_tradingsymbol"], resolved.get("expiry"), label,
+            )
+            return True
+        except Exception as exc:
+            logger.error("re_resolve_instrument: failed to re-resolve %s: %s", name, exc)
+            return False
+
+    logger.warning("re_resolve_instrument: %s not found in any instrument list", name)
+    return False
 
 
 # ── Contract rollover check ────────────────────────────────────────────────────
