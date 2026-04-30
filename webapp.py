@@ -635,7 +635,16 @@ def instrument_rollover():
         # Hourly instruments (e.g. GOLDM_H) inherit their contract from the
         # underlying base (e.g. GOLDM).  The scrip master only knows the base
         # name, so pin and re-resolve under that name.
-        pin_name = current.get("underlying", name) if current else name
+        # Look up underlying from config as well, in case the instrument failed
+        # to resolve (e.g. current contract just expired) and isn't in any list.
+        h_cfg = next(
+            (h for h in config.HOURLY_INSTRUMENTS if h["name"] == name), None
+        )
+        underlying = (
+            (current.get("underlying") if current else None)
+            or (h_cfg.get("underlying") if h_cfg else None)
+        )
+        pin_name = underlying if underlying else name
         pinned = contract_pin.pin_next_month(pin_name, exchange, after_expiry=after_expiry)
         logger.info(
             "Webapp: rollover pin set for %s → %s (expires %s)",
