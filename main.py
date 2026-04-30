@@ -201,6 +201,18 @@ def re_resolve_instrument(name: str) -> bool:
         try:
             resolved   = scrip_master.resolve_instrument(inst_def)
             bucket[idx] = resolved
+            # Rebuild any hourly variants that inherit from this base instrument.
+            for hi, h_inst in enumerate(RESOLVED_HOURLY_INSTRUMENTS):
+                if h_inst.get("underlying") == name:
+                    h_keys = {
+                        k: h_inst[k] for k in h_inst
+                        if k in _STRIP_KEYS or k in ("underlying", "contract_size", "long_only")
+                    }
+                    RESOLVED_HOURLY_INSTRUMENTS[hi] = {**resolved, **h_keys}
+                    logger.info(
+                        "re_resolve_instrument: hourly variant %s updated from base %s",
+                        h_inst["name"], name,
+                    )
             web_state.set_resolved_instruments(
                 RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS + RESOLVED_STOCK_INSTRUMENTS
             )
