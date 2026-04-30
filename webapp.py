@@ -411,6 +411,9 @@ def dashboard():
     inst_exchange  = {i["name"]: i["exchange"] for i in all_inst_defs}
     inst_synthetic = {i["name"] for i in all_inst_defs if i.get("mode") == "SYNTHETIC"}
     all_pins       = contract_pin.list_pins()
+    # Hourly instruments pin under their underlying name (e.g. GOLDM_H → GOLDM).
+    # Build a fallback map so the UI shows the pin badge on the hourly card too.
+    hourly_underlying = {h["name"]: h.get("underlying", h["name"]) for h in config.HOURLY_INSTRUMENTS}
 
     # Instrument cards — show all configured instruments, even before first candle
     instruments = snap["instruments"]
@@ -428,7 +431,8 @@ def dashboard():
             name, instruments.get(name, {}), state,
             hourly_enabled.get(name, True), timeframe_label="1H",
             exchange=inst_exchange.get(name, ""),
-            pin=all_pins.get(name.upper()),
+            pin=(all_pins.get(name.upper())
+                 or all_pins.get(hourly_underlying.get(name, name).upper())),
             show_rollover=(name not in inst_synthetic),
         )
         for name in hourly_names
