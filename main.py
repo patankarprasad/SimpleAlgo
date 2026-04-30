@@ -301,6 +301,28 @@ def _is_tender_period_error(exc: Exception) -> bool:
     return "tender period" in msg or "physical delivery" in msg
 
 
+def _auto_pin_and_resolve(instrument: dict, next_inst: dict) -> None:
+    """
+    Persist a contract pin for next_inst and re-resolve the instrument in-memory
+    so all subsequent ticks use the new contract without a restart.
+    Called after a tender-period fallback order succeeds.
+    """
+    import contract_pin as _cp
+    pin_name = next_inst.get("underlying") or next_inst["name"]
+    # Use the *current* contract's expiry as the reference so pin_next_month
+    # selects next_inst (the contract after the current one), not the one after that.
+    after_expiry = instrument.get("expiry")
+    try:
+        _cp.pin_next_month(pin_name, next_inst["exchange"], after_expiry=after_expiry)
+        re_resolve_instrument(pin_name)
+        logger.info(
+            "Auto-pinned %s → %s after tender-period rollover",
+            pin_name, next_inst["kite_tradingsymbol"],
+        )
+    except Exception as exc:
+        logger.warning("Auto-pin failed for %s: %s", pin_name, exc)
+
+
 def _next_month_instrument(instrument: dict) -> dict:
     """
     Return an instrument dict updated to the next futures contract after the
@@ -308,7 +330,8 @@ def _next_month_instrument(instrument: dict) -> dict:
     entering tender period.
     The caller is responsible for saving the new kite_tradingsymbol to state.
     """
-    contracts = scrip_master.get_all_futures(instrument["name"], instrument["exchange"])
+    lookup_name = instrument.get("underlying") or instrument["name"]
+    contracts = scrip_master.get_all_futures(lookup_name, instrument["exchange"])
     if not contracts:
         raise RuntimeError(
             f"No active contracts available for {instrument['name']} "
@@ -751,6 +774,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     place_buy(kite, next_inst)
                     entry_sym      = next_inst["kite_tradingsymbol"]
                     entry_exchange = next_inst["exchange"]
+                    _auto_pin_and_resolve(instrument, next_inst)
                 trade_log.log_trade(name, "BUY", entry_sym, order_qty)
                 notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
                 set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
@@ -793,6 +817,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     place_sell(kite, next_inst)
                     entry_sym      = next_inst["kite_tradingsymbol"]
                     entry_exchange = next_inst["exchange"]
+                    _auto_pin_and_resolve(instrument, next_inst)
                 trade_log.log_trade(name, "SELL", entry_sym, order_qty)
                 notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
                 set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
