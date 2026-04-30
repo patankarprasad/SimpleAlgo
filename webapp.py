@@ -625,18 +625,25 @@ def instrument_rollover():
         # from the scrip master (which could skip a month if the near contract
         # has already expired from the master's active list).
         import main as _main
-        current = next(
-            (i for i in _main.RESOLVED_INSTRUMENTS if i["name"] == name), None
+        all_instruments = (
+            _main.RESOLVED_INSTRUMENTS
+            + _main.RESOLVED_HOURLY_INSTRUMENTS
+            + _main.RESOLVED_STOCK_INSTRUMENTS
         )
+        current = next((i for i in all_instruments if i["name"] == name), None)
         after_expiry = current.get("expiry") if current else None
-        pinned = contract_pin.pin_next_month(name, exchange, after_expiry=after_expiry)
+        # Hourly instruments (e.g. GOLDM_H) inherit their contract from the
+        # underlying base (e.g. GOLDM).  The scrip master only knows the base
+        # name, so pin and re-resolve under that name.
+        pin_name = current.get("underlying", name) if current else name
+        pinned = contract_pin.pin_next_month(pin_name, exchange, after_expiry=after_expiry)
         logger.info(
             "Webapp: rollover pin set for %s → %s (expires %s)",
-            name, pinned["kite_tradingsymbol"], pinned["expiry"],
+            pin_name, pinned["kite_tradingsymbol"], pinned["expiry"],
         )
         # Immediately update the in-memory resolved instrument so the next
         # strategy tick picks up the new contract without needing an app restart.
-        _main.re_resolve_instrument(name)
+        _main.re_resolve_instrument(pin_name)
     except Exception as exc:
         logger.error("instrument_rollover failed for %s: %s", name, exc)
     return redirect("/")
