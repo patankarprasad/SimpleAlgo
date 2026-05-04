@@ -109,12 +109,29 @@ def _await_order_complete(
     )
 
 
+def _fetch_ltp(kite: KiteConnect, instrument: dict) -> float:
+    """Fetch current LTP for an instrument; returns 0.0 on failure."""
+    key = f"{instrument['exchange']}:{instrument['kite_tradingsymbol']}"
+    try:
+        return kite.ltp([key]).get(key, {}).get("last_price", 0.0)
+    except Exception as exc:
+        logger.debug("LTP fetch failed for %s: %s", key, exc)
+        return 0.0
+
+
 def place_buy(kite: KiteConnect, instrument: dict) -> str:
     """Open a long (BUY) position. Retries once on circuit-limit rejection."""
     if kite is None:
         raise RuntimeError(f"Kite session unavailable — BUY order not placed for {instrument['name']}")
     qty   = _order_qty(instrument)
     label = f"{instrument['name']} BUY {instrument['kite_tradingsymbol']}"
+    ltp   = _fetch_ltp(kite, instrument)
+
+    logger.info(
+        "Placing BUY | %s | symbol=%s | exchange=%s | product=%s | qty=%d | ltp=%.2f",
+        instrument["name"], instrument["kite_tradingsymbol"],
+        instrument["exchange"], instrument["product"], qty, ltp,
+    )
 
     for attempt in range(2):
         order_id = _place_order(kite,
@@ -135,9 +152,10 @@ def place_buy(kite: KiteConnect, instrument: dict) -> str:
             return order_id
         except RuntimeError as exc:
             if attempt == 0 and _is_circuit_limit_error(exc):
+                ltp = _fetch_ltp(kite, instrument)
                 logger.warning(
-                    "%s: BUY rejected due to circuit limits — retrying once in 2s: %s",
-                    instrument["name"], exc,
+                    "%s: BUY rejected due to circuit limits (ltp=%.2f) — retrying once in 2s: %s",
+                    instrument["name"], ltp, exc,
                 )
                 time.sleep(2)
                 continue
@@ -150,6 +168,13 @@ def place_sell(kite: KiteConnect, instrument: dict) -> str:
         raise RuntimeError(f"Kite session unavailable — SELL order not placed for {instrument['name']}")
     qty   = _order_qty(instrument)
     label = f"{instrument['name']} SELL {instrument['kite_tradingsymbol']}"
+    ltp   = _fetch_ltp(kite, instrument)
+
+    logger.info(
+        "Placing SELL | %s | symbol=%s | exchange=%s | product=%s | qty=%d | ltp=%.2f",
+        instrument["name"], instrument["kite_tradingsymbol"],
+        instrument["exchange"], instrument["product"], qty, ltp,
+    )
 
     for attempt in range(2):
         order_id = _place_order(kite,
@@ -170,9 +195,10 @@ def place_sell(kite: KiteConnect, instrument: dict) -> str:
             return order_id
         except RuntimeError as exc:
             if attempt == 0 and _is_circuit_limit_error(exc):
+                ltp = _fetch_ltp(kite, instrument)
                 logger.warning(
-                    "%s: SELL rejected due to circuit limits — retrying once in 2s: %s",
-                    instrument["name"], exc,
+                    "%s: SELL rejected due to circuit limits (ltp=%.2f) — retrying once in 2s: %s",
+                    instrument["name"], ltp, exc,
                 )
                 time.sleep(2)
                 continue
