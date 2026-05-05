@@ -113,9 +113,13 @@ def _fetch_ltp(kite: KiteConnect, instrument: dict) -> float:
     """Fetch current LTP for an instrument; returns 0.0 on failure."""
     key = f"{instrument['exchange']}:{instrument['kite_tradingsymbol']}"
     try:
-        return kite.ltp([key]).get(key, {}).get("last_price", 0.0)
+        resp = kite.ltp([key])
+        ltp = resp.get(key, {}).get("last_price", 0.0)
+        if ltp == 0.0:
+            logger.warning("LTP returned 0.0 for %s — full response: %s", key, resp)
+        return ltp
     except Exception as exc:
-        logger.debug("LTP fetch failed for %s: %s", key, exc)
+        logger.warning("LTP fetch failed for %s: %s", key, exc)
         return 0.0
 
 
