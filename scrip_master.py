@@ -37,7 +37,9 @@ import requests
 logger = logging.getLogger(__name__)
 
 # ── Cache file paths ───────────────────────────────────────────────────────────
-_CACHE_DIR    = Path("cache")
+import sys as _sys
+_BASE = os.path.dirname(_sys.executable) if getattr(_sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
+_CACHE_DIR    = Path(_BASE) / "cache"
 _ANGEL_CACHE  = _CACHE_DIR / "angel_scrip_master.json"
 _KITE_CACHE   = _CACHE_DIR / "kite_instruments.csv"
 _META_FILE    = _CACHE_DIR / "scrip_master_meta.json"
