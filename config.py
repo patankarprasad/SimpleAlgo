@@ -3,9 +3,15 @@ Central configuration – instruments, lot sizes, and strategy params.
 Credentials are loaded from .env (never hardcode them here).
 """
 import os
+import sys
 from dotenv import load_dotenv
 
-load_dotenv()
+if getattr(sys, "frozen", False):
+    BASE_DIR = os.path.dirname(sys.executable)
+else:
+    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+load_dotenv(os.path.join(BASE_DIR, ".env"))
 
 # ── Angel SmartAPI Credentials ─────────────────────────────────────────────────
 # Variable names match the existing Angel login class convention exactly.
@@ -261,8 +267,8 @@ STOCK_INSTRUMENTS = [
 ]
 
 # ── Session token cache paths ──────────────────────────────────────────────────
-KITE_TOKEN_FILE    = "kite_token.json"
-ANGEL_TOKEN_FILE   = "angel_token.json"
-STATE_FILE         = "positions_state.json"
-PAPER_STATE_FILE   = "paper_positions_state.json"  # persisted paper trade positions
-CONTRACT_PIN_FILE  = "contract_pin.json"            # manual rollover overrides
+KITE_TOKEN_FILE    = os.path.join(BASE_DIR, "kite_token.json")
+ANGEL_TOKEN_FILE   = os.path.join(BASE_DIR, "angel_token.json")
+STATE_FILE         = os.path.join(BASE_DIR, "positions_state.json")
+PAPER_STATE_FILE   = os.path.join(BASE_DIR, "paper_positions_state.json")  # persisted paper trade positions
+CONTRACT_PIN_FILE  = os.path.join(BASE_DIR, "contract_pin.json")            # manual rollover overrides

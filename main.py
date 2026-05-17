@@ -18,6 +18,7 @@ Usage
 """
 import concurrent.futures
 import logging
+import os
 import sys
 from datetime import datetime, timedelta
 
@@ -52,7 +53,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler("algo.log", encoding="utf-8"),
+        logging.FileHandler(os.path.join(config.BASE_DIR, "algo.log"), encoding="utf-8"),
     ],
 )
 logger = logging.getLogger(__name__)
