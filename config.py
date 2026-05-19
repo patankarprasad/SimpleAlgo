@@ -26,6 +26,11 @@ KITE_USER_ID    = os.getenv("KITE_USER_ID")
 KITE_PASSWORD   = os.getenv("KITE_PASSWORD")
 KITE_PIN        = os.getenv("KITE_PIN")
 
+# ── Data provider ──────────────────────────────────────────────────────────────
+# "angel" uses Angel SmartAPI (free).  "kite" uses Kite historical data API
+# (requires a paid Kite Connect Historical Data subscription).
+DATA_PROVIDER = os.getenv("DATA_PROVIDER", "angel").lower()
+
 # ── Telegram notifications ─────────────────────────────────────────────────────
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "")
 TELEGRAM_CHAT_ID   = os.getenv("TELEGRAM_CHAT_ID",   "")
