@@ -118,9 +118,13 @@ def get_candles(instrument: dict, n_candles: int = None, interval: str = None) -
     candle). We strip any row whose open timestamp falls within the current
     candle interval so callers can always safely use ``df.iloc[-1]``.
     """
-    n_candles = n_candles or config.CANDLE_LOOKBACK
+    n_candles    = n_candles or config.CANDLE_LOOKBACK
     raw_interval = interval or instrument["timeframe"]
-    interval  = INTERVAL_MAP.get(raw_interval, raw_interval)
+    interval     = INTERVAL_MAP.get(raw_interval, raw_interval)
+
+    if config.DATA_PROVIDER == "kite":
+        import kite_data
+        return kite_data.get_candles_kite(instrument, n_candles, interval)
 
     # Determine a from_date that is wide enough to contain n_candles bars,
     # accounting for weekends, holidays, and MCX evening gaps.
@@ -295,6 +299,10 @@ def get_option_ltps(options: list[dict]) -> dict[str, float]:
     Returns {kite_tradingsymbol: ltp} for each successfully fetched contract.
     Items with missing tokens or unfetched by the API are absent from the result.
     """
+    if config.DATA_PROVIDER == "kite":
+        import kite_data
+        return kite_data.get_option_ltps_kite(options)
+
     # Group tokens by exchange and build reverse map token -> kite_tradingsymbol
     exchange_tokens: dict[str, list[str]] = {}
     token_to_kite:   dict[str, str]       = {}
