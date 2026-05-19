@@ -46,10 +46,11 @@ KITE_AUTH_PIN        = os.getenv("KITE_AUTH_PIN", "0000")         # PIN to prote
 KITE_AUTH_SECRET_KEY = os.getenv("KITE_AUTH_SECRET_KEY", "change-me-in-dotenv")  # Flask session key
 
 # ── Angel rate-limit delays  (source: smartapi.angelbroking.com/docs/RateLimit) ─
-# getCandleData : 3 req/s  → min gap 0.334s → use 0.4s
+# getCandleData : 3 req/s  → min gap 0.334s → use 0.6s (extra headroom to avoid
+#                 burst throttling when many instruments fetch simultaneously)
 # searchScrip   : 1 req/s  → min gap 1.0s   → use 1.1s
 # getLtpData    : 10 req/s → min gap 0.1s   → use 0.15s
-ANGEL_BASE_DELAY   = float(os.getenv("ANGEL_BASE_DELAY",   "0.4"))   # getCandleData (3/s limit)
+ANGEL_BASE_DELAY   = float(os.getenv("ANGEL_BASE_DELAY",   "0.6"))   # getCandleData (3/s limit)
 ANGEL_SEARCH_DELAY = float(os.getenv("ANGEL_SEARCH_DELAY", "1.1"))   # searchScrip   (1/s limit)
 ANGEL_LTP_DELAY    = float(os.getenv("ANGEL_LTP_DELAY",    "0.15"))  # getLtpData    (10/s limit)
 

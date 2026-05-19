@@ -31,6 +31,11 @@ _angel_last_call_time = 0.0
 _angel_ltp_lock           = threading.Lock()
 _angel_ltp_last_call_time = 0.0
 
+# Penalty applied to the shared rate limiter when a rate-limit error is detected.
+# Pushes _angel_last_call_time this many seconds into the future so all queued
+# callers also wait, not just the one that got the error.
+_ANGEL_RATE_LIMIT_PENALTY = 3.0
+
 
 def _angel_rate_limit() -> None:
     """Block the calling thread until it is safe to issue an Angel getCandleData call."""
@@ -40,6 +45,17 @@ def _angel_rate_limit() -> None:
         if elapsed < config.ANGEL_BASE_DELAY:
             time.sleep(config.ANGEL_BASE_DELAY - elapsed)
         _angel_last_call_time = time.monotonic()
+
+
+def _angel_rate_limit_penalize(extra_seconds: float) -> None:
+    """Push the shared rate-limiter timestamp forward after a rate-limit error.
+
+    This causes all threads waiting on _angel_rate_limit() to sleep an additional
+    `extra_seconds` beyond the normal base delay, dampening the burst.
+    """
+    global _angel_last_call_time
+    with _angel_call_lock:
+        _angel_last_call_time = time.monotonic() + extra_seconds
 
 
 def _angel_ltp_rate_limit() -> None:
@@ -130,7 +146,10 @@ def get_candles(instrument: dict, n_candles: int = None, interval: str = None) -
         instrument["name"], params["exchange"], params["symboltoken"], interval,
     )
 
-    # Fetch with retry: relogin once on first failure, then exponential backoff
+    # Fetch with retry:
+    #   - Rate-limit errors ("exceeding access rate"): back off with increasing
+    #     sleep and penalise the shared rate limiter; do NOT re-login.
+    #   - Other failures (auth / server errors): re-login once, then back off.
     resp         = None
     relogin_done = False
     retry_delay  = _CANDLE_RETRY_BASE
@@ -156,7 +175,20 @@ def get_candles(instrument: dict, n_candles: int = None, interval: str = None) -
                 f"{_CANDLE_MAX_RETRIES} attempts: {resp}"
             )
 
-        if not relogin_done:
+        is_rate_limited = "exceeding access rate" in str(resp.get("message", "")).lower()
+
+        if is_rate_limited:
+            # Penalise the shared rate limiter so other queued callers also slow
+            # down, then sleep before retrying. Re-login does not help here.
+            _angel_rate_limit_penalize(_ANGEL_RATE_LIMIT_PENALTY)
+            wait = min(retry_delay, _CANDLE_RETRY_MAX)
+            logger.info(
+                "Angel: rate limited for %s — waiting %.1fs before retry %d/%d ...",
+                instrument["name"], wait, attempt + 1, _CANDLE_MAX_RETRIES,
+            )
+            time.sleep(wait)
+            retry_delay *= _CANDLE_RETRY_BACKOFF
+        elif not relogin_done:
             logger.info("Angel: forcing re-login before next retry ...")
             angel        = force_relogin()
             relogin_done = True
