@@ -37,6 +37,7 @@ import requests
 logger = logging.getLogger(__name__)
 
 # ── Cache file paths ───────────────────────────────────────────────────────────
+import os
 import sys as _sys
 _BASE = os.path.dirname(_sys.executable) if getattr(_sys, "frozen", False) else os.path.dirname(os.path.abspath(__file__))
 _CACHE_DIR    = Path(_BASE) / "cache"
