@@ -162,6 +162,21 @@ pre.log{background:#0a0c12;border:1px solid var(--border);border-radius:8px;
           display:flex;align-items:baseline;gap:6px}
 .pnl-est{font-size:.68rem;font-weight:400;color:var(--muted)}
 
+/* ── Booked-manually badge / button ── */
+.bm-wrap{display:flex;align-items:center;gap:8px;padding:6px 0 2px;
+         border-top:1px solid var(--border);flex-wrap:wrap}
+.bm-badge{font-size:.68rem;color:#fb923c;flex:1}
+.bm-phase{font-size:.62rem;color:var(--muted);display:block;margin-top:1px}
+.bm-btn{padding:3px 10px;border:none;border-radius:8px;font-size:.72rem;
+        font-weight:600;cursor:pointer;transition:opacity .15s;
+        background:rgba(234,88,12,.2);color:#fb923c;
+        border:1px solid rgba(234,88,12,.4)}
+.bm-btn:hover{opacity:.82}
+.bm-clear-btn{padding:2px 8px;border:none;border-radius:6px;font-size:.68rem;
+              cursor:pointer;background:rgba(75,85,104,.3);color:var(--muted);
+              border:1px solid var(--border)}
+.bm-clear-btn:hover{opacity:.82}
+
 /* ── Stats bar ── */
 .stats-bar{display:grid;grid-template-columns:repeat(auto-fill,minmax(140px,1fr));
            gap:10px;margin-bottom:20px}
@@ -382,6 +397,12 @@ def dashboard():
     state = load_state()
     inst_names = [i["name"] for i in config.INSTRUMENTS]
     enabled_map = stcfg.get_all(inst_names)
+    all_inst_names = (
+        inst_names
+        + [i["name"] for i in config.HOURLY_INSTRUMENTS]
+        + [i["name"] for i in config.STOCK_INSTRUMENTS]
+    )
+    bm_map = stcfg.get_all_booked_manually(all_inst_names)
 
     # Status badges
     if config.DRY_RUN:
@@ -423,6 +444,7 @@ def dashboard():
             exchange=inst_exchange.get(name, ""),
             pin=all_pins.get(name.upper()),
             show_rollover=(name not in inst_synthetic),
+            booked_manually=bm_map.get(name),
         )
         for name in inst_names
     )
@@ -434,6 +456,7 @@ def dashboard():
             pin=(all_pins.get(name.upper())
                  or all_pins.get(hourly_underlying.get(name, name).upper())),
             show_rollover=(name not in inst_synthetic),
+            booked_manually=bm_map.get(name),
         )
         for name in hourly_names
     )
@@ -444,6 +467,7 @@ def dashboard():
             exchange=inst_exchange.get(name, "NFO"),
             pin=all_pins.get(name.upper()),
             show_rollover=True,
+            booked_manually=bm_map.get(name),
         )
         for name in stock_names
     )
@@ -482,7 +506,8 @@ def dashboard():
 
 def _make_card(name: str, data: dict, state: dict, enabled: bool,
                timeframe_label: str = "", exchange: str = "",
-               pin: dict | None = None, show_rollover: bool = True) -> str:
+               pin: dict | None = None, show_rollover: bool = True,
+               booked_manually: dict | None = None) -> str:
     pos_size    = state.get(name, {}).get("position_size", 0)
     entry_price = state.get(name, {}).get("entry_price", 0.0)
     signal      = str(data.get("signal", ""))
@@ -579,6 +604,34 @@ def _make_card(name: str, data: dict, state: dict, enabled: bool,
     </form>
   </div>"""
 
+    # ── Booked-manually section ───────────────────────────────────────────────
+    bm_html = ""
+    if booked_manually:
+        direction = booked_manually["direction"]
+        sl_fired  = booked_manually["sl_fired"]
+        if sl_fired:
+            phase_text = "SL hit — waiting for next entry signal"
+        else:
+            phase_text = f"Waiting for {direction} SL signal to fire"
+        bm_html = f"""
+  <div class="bm-wrap">
+    <span class="bm-badge">&#128203; Booked Manually
+      <span class="bm-phase">{phase_text}</span>
+    </span>
+    <form method="post" action="/strategy/unbook_manually" style="margin:0">
+      <input type="hidden" name="name" value="{name}">
+      <button type="submit" class="bm-clear-btn">&#10005; Clear</button>
+    </form>
+  </div>"""
+    elif pos_size != 0 and enabled:
+        bm_html = f"""
+  <div class="bm-wrap">
+    <form method="post" action="/strategy/book_manually" style="margin:0">
+      <input type="hidden" name="name" value="{name}">
+      <button type="submit" class="bm-btn">&#128203; Book Manually</button>
+    </form>
+  </div>"""
+
     return f"""
 <div class="card">
   <div{body_style}>
@@ -595,6 +648,7 @@ def _make_card(name: str, data: dict, state: dict, enabled: bool,
     <div class="card-foot">Updated {updated_str}</div>
   </div>
   {rollover_html}
+  {bm_html}
   {toggle_html}
 </div>"""
 
@@ -609,6 +663,43 @@ def strategy_toggle():
     if name:
         stcfg.set_enabled(name, enabled)
         logger.info("Strategy %s set to enabled=%s", name, enabled)
+    return redirect("/")
+
+
+@app.route("/strategy/book_manually", methods=["POST"])
+@login_required
+def strategy_book_manually():
+    """Mark a strategy as 'Booked Manually': clears the algo position state and
+    blocks new entries until the natural SL fires and the next entry signal appears."""
+    name = request.form.get("name", "").strip()
+    if not name:
+        return redirect("/")
+    state    = load_state()
+    pos_size = get_position(state, name)
+    if pos_size == 0:
+        logger.warning("book_manually: %s has no open position in algo state — nothing to book", name)
+        return redirect("/")
+    direction = "LONG" if pos_size > 0 else "SHORT"
+    # Clear algo position state — the broker position is already closed
+    set_position(state, name, 0)
+    # Also clear paper position if present (DRY_RUN case)
+    if paper_trading.get_position_size(name) != 0:
+        snap  = web_state.snapshot()
+        close = snap["instruments"].get(name, {}).get("close", 0.0)
+        paper_trading.close_position(name, float(close) if close else 0.0)
+    stcfg.set_booked_manually(name, direction)
+    logger.info("Strategy %s booked manually (was %s)", name, direction)
+    return redirect("/")
+
+
+@app.route("/strategy/unbook_manually", methods=["POST"])
+@login_required
+def strategy_unbook_manually():
+    """Clear the 'Booked Manually' flag, resuming normal strategy behaviour."""
+    name = request.form.get("name", "").strip()
+    if name:
+        stcfg.clear_booked_manually(name)
+        logger.info("Strategy %s: booked-manually flag cleared", name)
     return redirect("/")
 
 
@@ -855,8 +946,6 @@ def positions():
         msg_banner = '<p style="color:var(--green-l);margin-bottom:12px">&#10003; All positions squared off.</p>'
     elif msg == "sqoff_err":
         msg_banner = '<p style="color:var(--red-l);margin-bottom:12px">&#9888; Square-off failed — check log.</p>'
-    elif msg == "cleared":
-        msg_banner = '<p style="color:var(--green-l);margin-bottom:12px">&#10003; Position state cleared.</p>'
     elif msg.startswith("cleared_"):
         cleared_name = msg[len("cleared_"):]
         msg_banner = f'<p style="color:var(--green-l);margin-bottom:12px">&#10003; Cleared state for {_html.escape(cleared_name)}.</p>'
@@ -870,10 +959,6 @@ def positions():
   <form method="post" action="/positions/sqoff" style="margin:0"
         onsubmit="return confirm('Place market orders to close ALL open positions on Kite?')">
     <button type="submit" class="btn-sm btn-danger-sm">&#9632; Square Off All</button>
-  </form>
-  <form method="post" action="/positions/clear" style="margin:0"
-        onsubmit="return confirm('Clear algo position state (no orders placed)?')">
-    <button type="submit" class="btn-sm btn-warn-sm">&#128465; Clear State</button>
   </form>
 </div>"""
 
@@ -1031,14 +1116,6 @@ def positions_sqoff():
     except Exception as exc:
         logger.error("Web UI square off failed: %s", exc)
         return redirect("/positions?msg=sqoff_err")
-
-
-@app.route("/positions/clear", methods=["POST"])
-@login_required
-def positions_clear():
-    save_state({})
-    logger.info("Web UI: position state cleared")
-    return redirect("/positions?msg=cleared")
 
 
 @app.route("/positions/clear/<name>", methods=["POST"])

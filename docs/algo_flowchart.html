@@ -1,0 +1,281 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>SimpleAlgo – Trading Logic Flowchart</title>
+<script src="https://unpkg.com/vis-network/standalone/umd/vis-network.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #0f1117; color: #e0e0e0; }
+  header { padding: 16px 24px; background: #1a1d27; border-bottom: 1px solid #2d3043; }
+  header h1 { font-size: 1.3rem; font-weight: 600; color: #7eb3f5; }
+  header p  { font-size: 0.8rem; color: #6b7280; margin-top: 4px; }
+  #legend {
+    display: flex; flex-wrap: wrap; gap: 10px;
+    padding: 10px 24px; background: #13151f; border-bottom: 1px solid #2d3043;
+  }
+  .leg { display: flex; align-items: center; gap: 6px; font-size: 0.75rem; }
+  .leg-dot { width: 12px; height: 12px; border-radius: 3px; }
+  #network { width: 100%; height: calc(100vh - 100px); }
+  #tooltip {
+    position: fixed; display: none; background: #1e2130;
+    border: 1px solid #3d4462; border-radius: 6px;
+    padding: 8px 12px; font-size: 0.75rem; max-width: 280px;
+    pointer-events: none; z-index: 999; color: #c9d1e0; line-height: 1.5;
+  }
+</style>
+</head>
+<body>
+<header>
+  <h1>SimpleAlgo — Trading Logic Flowchart</h1>
+  <p>Scroll to zoom · Drag nodes · Hover for detail</p>
+</header>
+<div id="legend">
+  <div class="leg"><div class="leg-dot" style="background:#3b82f6"></div>Startup</div>
+  <div class="leg"><div class="leg-dot" style="background:#8b5cf6"></div>Scheduler / Gates</div>
+  <div class="leg"><div class="leg-dot" style="background:#f59e0b"></div>Signal Calc</div>
+  <div class="leg"><div class="leg-dot" style="background:#10b981"></div>Decision / State</div>
+  <div class="leg"><div class="leg-dot" style="background:#ef4444"></div>Order Execution</div>
+  <div class="leg"><div class="leg-dot" style="background:#6b7280"></div>Dry-Run / Notification</div>
+  <div class="leg"><div class="leg-dot" style="background:#ec4899"></div>Synthetic (Options)</div>
+</div>
+<div id="network"></div>
+<div id="tooltip"></div>
+<script>
+const C = {
+  startup:  { bg:'#1d3a6b', border:'#3b82f6', font:'#93c5fd' },
+  sched:    { bg:'#2d1b69', border:'#8b5cf6', font:'#c4b5fd' },
+  signal:   { bg:'#4a3000', border:'#f59e0b', font:'#fcd34d' },
+  decision: { bg:'#064e3b', border:'#10b981', font:'#6ee7b7' },
+  order:    { bg:'#7f1d1d', border:'#ef4444', font:'#fca5a5' },
+  dryrun:   { bg:'#1f2937', border:'#6b7280', font:'#d1d5db' },
+  synth:    { bg:'#500724', border:'#ec4899', font:'#fbcfe8' },
+};
+
+function node(id, label, cat, title='', shape='box', x=0, y=0) {
+  return {
+    id, label,
+    title: title || label,
+    shape,
+    color: { background: C[cat].bg, border: C[cat].border, highlight: { background: C[cat].bg, border:'#fff' } },
+    font: { color: C[cat].font, size: 12, face: 'Segoe UI' },
+    borderWidth: 2,
+    x, y,
+  };
+}
+function diamond(id, label, cat, title='', x=0, y=0) {
+  return node(id, label, cat, title, 'diamond', x, y);
+}
+
+// ── x positions for swim-lanes ──
+const LX = { startup: -900, sched: -500, signal: -100, decision: 300, exec: 700, synth: 1100 };
+
+const nodes = new vis.DataSet([
+  // ── STARTUP ──
+  node('start',    'START\nmain.py', 'startup', 'Entry point: main.py\nCalls initialise(), starts Flask + APScheduler', 'ellipse', LX.startup, -800),
+  node('init',     'initialise()', 'startup', 'Fetches contract master from Angel/Kite\nResolves angel_token, kite_tradingsymbol,\nexpiry, lot_size for all INSTRUMENTS', 'box', LX.startup, -680),
+  node('scrip',    'scrip_master\n.refresh_masters()', 'startup', 'Downloads latest instrument list from exchange\nRequired to map names → tokens', 'box', LX.startup, -560),
+  node('resolve',  'Resolve instruments\n+ HOURLY_INSTRUMENTS', 'startup', 'Populates: angel_token, kite_tradingsymbol\nSYNTHETIC mode → also resolves NSE spot index tokens', 'box', LX.startup, -440),
+  node('rollover', '_check_rollover()', 'startup', 'Warns if open position is in an expired contract\nAllows trader to take manual action before algo starts', 'box', LX.startup, -320),
+  node('scheduler','APScheduler\n+ Flask start', 'startup', '15-min job → run_strategy() (all instruments)\nHourly MCX: HH:00:05 IST\nHourly NFO: HH:15:05 IST\nDaily 08:30 login reminder\nDaily 09:00 strategy status', 'box', LX.startup, -200),
+
+  // ── SCHEDULER / GATES ──
+  node('trigger',  'Candle close\ntrigger (15 min)', 'sched', 'APScheduler fires 1 second after every 15-min candle close', 'ellipse', LX.sched, -800),
+  node('loop',     'run_strategy()\n→ _process_instrument()\nfor each instrument', 'sched', 'Iterates over all enabled instruments in INSTRUMENTS list', 'box', LX.sched, -680),
+  diamond('enabled', 'Strategy\nenabled?', 'sched', 'config.is_enabled(name)\nSkip instrument if manually disabled', 'ellipse', LX.sched, -560),
+  diamond('hours',   'Within\ntrade hours?', 'sched', 'Checks current IST time vs instrument trade_start / trade_end\nE.g. GOLDM: 09:00–23:30, NIFTY: 09:15–15:30', 'ellipse', LX.sched, -440),
+  diamond('firstcan','Past first\ncandle guard?', 'sched', 'Prevents trading on the very first candle of the session\nFirst allowed calc = trade_start + interval_minutes', 'ellipse', LX.sched, -320),
+  diamond('market',  'Market open\ntoday?', 'sched', 'Fetches latest candle from Angel\nIf newest candle date ≠ today IST → holiday/weekend, skip', 'ellipse', LX.sched, -200),
+  node('skip',     'SKIP\ninstrument', 'sched', 'No action taken — position held as-is\nWill retry on next candle', 'ellipse', LX.sched, -80),
+
+  // ── SIGNAL CALCULATION ──
+  node('candles',  'get_candles()\nfrom Angel API', 'signal', 'SYNTHETIC mode: uses NSE spot index prices (not futures)\nRegular mode: uses futures prices\nInterval = 15min (or 60min for hourly)', 'box', LX.signal, -800),
+  node('compute',  'compute_signals()\nindicators.py', 'signal', 'Inputs: OHLCV dataframe\nOutputs: st1, st2, ma, signal column\n\nSupertrend 1: ATR(10) × 2.0  (aggressive)\nSupertrend 2: ATR(10) × 3.0  (conservative)\nSMA-50: 50-period simple moving average', 'box', LX.signal, -660),
+  node('lastbar',  'Extract last\nclosed bar', 'signal', 'last = df_sig.iloc[-1]\nsignal = last["signal"]\nclose = last["close"]', 'box', LX.signal, -540),
+  node('siglogic', 'Signal Logic', 'signal',
+    'BUY:        close > ST1  AND close > ST2  AND close > MA\nSELL:       close < ST1  AND close < ST2  AND close < MA\nEXIT_LONG:  close < ST1  (aggressive 1st exit)\nEXIT_SHORT: close > ST1  (aggressive 1st exit)\nNone:       no condition met → hold', 'box', LX.signal, -420),
+  diamond('sig4',  'signal = ?', 'signal', 'Route to appropriate branch below', 'diamond', LX.signal, -280),
+
+  // ── DECISION / STATE ──
+  node('loadstate','Load state\n(state.json)', 'decision', 'pos = position_size from state.json\npos = 0  → flat\npos > 0  → long\npos < 0  → short', 'box', LX.decision, -800),
+  diamond('pos0',   'pos = 0\n(flat)?', 'decision', 'No open position', 'diamond', LX.decision, -660),
+  diamond('poslong','pos > 0\n(long)?', 'decision', 'Currently holding a long position', 'diamond', LX.decision, -520),
+  diamond('posshort','pos < 0\n(short)?', 'decision', 'Currently holding a short position', 'diamond', LX.decision, -380),
+  node('hold',     'HOLD\n(no action)', 'decision', 'Signal is None or irrelevant\nPosition unchanged until next candle', 'ellipse', LX.decision, -200),
+
+  // ── ORDER EXECUTION – ENTER LONG ──
+  diamond('dryB',  'DRY_RUN?', 'dryrun', 'If .env DRY_RUN=true → paper trade path', 'diamond', LX.exec, -800),
+  node('paperLong','paper_trading\n.open_position(BUY)', 'dryrun', 'In-memory long position\nPersisted to paper_positions_state.json', 'box', LX.exec+200, -800),
+  diamond('synthB','is_synthetic?', 'synth', 'NIFTY/BANKNIFTY instruments use synthetic options strategy', 'diamond', LX.exec, -660),
+  node('synthBuy', 'place_synthetic_buy()\nBUY CE + SELL PE\n(ATM options)', 'synth', 'Leg 1: BUY CE at ATM strike\n  → wait for COMPLETE\nLeg 2: SELL PE at ATM strike\n  → wait for COMPLETE\nIf Leg 2 fails → CRITICAL ERROR (manual fix needed)', 'box', LX.exec+200, -660),
+  node('regBuy',   'place_buy()\nMARKET order', 'order', 'Fetch LTP from Kite\nPlace MARKET BUY: qty = lots × lot_size\nPoll order_history() until COMPLETE / REJECTED\nOn circuit-limit error → wait 2s, retry once\nTender period detected → switch to next-month contract', 'box', LX.exec, -540),
+  node('saveLong', 'Save state\npos = +qty', 'decision', 'set_position(state, name, +qty)\nWrites atomically to state.json', 'box', LX.exec, -420),
+
+  // ── ORDER EXECUTION – ENTER SHORT ──
+  diamond('longOnly','long_only\nflag set?', 'decision', 'Hourly instruments default to long_only=True\nSkips SELL signal entirely', 'diamond', LX.exec, -280),
+  diamond('dryS',   'DRY_RUN?', 'dryrun', '', 'diamond', LX.exec, -160),
+  node('paperShort','paper_trading\n.open_position(SELL)', 'dryrun', 'In-memory short position', 'box', LX.exec+200, -160),
+  diamond('synthS', 'is_synthetic?', 'synth', '', 'diamond', LX.exec, -40),
+  node('synthShort','place_short_ce()\nSELL CE (premium collection)', 'synth', 'Find monthly CE option closest to target_premium\n  e.g. target_premium=300 for NIFTY\nSELL that CE\nWait for COMPLETE\nSave: is_short_ce=True', 'box', LX.exec+200, -40),
+  node('regSell',   'place_sell()\nMARKET order', 'order', 'Mirror of place_buy() but transaction_type=SELL\nPlace MARKET SELL: qty = lots × lot_size', 'box', LX.exec, 80),
+  node('saveShort', 'Save state\npos = -qty', 'decision', 'set_position(state, name, -qty)', 'box', LX.exec, 200),
+
+  // ── EXIT LONG ──
+  node('exitLongLabel','EXIT LONG\nbranch', 'order', 'Triggered by EXIT_LONG signal (close < ST1)\nOR SELL signal while already long (trend flip)', 'box', LX.exec, 320),
+  diamond('dryEL',  'DRY_RUN?', 'dryrun', '', 'diamond', LX.exec, 440),
+  node('paperEL',   'paper_trading\n.close_position()', 'dryrun', 'P&L = (exit_price - entry_price) × qty', 'box', LX.exec+200, 440),
+  diamond('synthEL','is_synthetic?', 'synth', '', 'diamond', LX.exec, 560),
+  node('synthELop', 'close_synthetic_long()\nSELL CE + BUY PE', 'synth', 'Leg 1: SELL CE (close long call)\nLeg 2: BUY PE (close short put)\nIf Leg 2 fails → CRITICAL ERROR', 'box', LX.exec+200, 560),
+  node('regEL',     'close_long()\nMARKET SELL', 'order', 'Place MARKET SELL: qty = original qty (100% close)\nPoll until COMPLETE', 'box', LX.exec, 680),
+  node('clearLong', 'Clear state\npos = 0', 'decision', 'set_position(state, name, 0)', 'box', LX.exec, 800),
+  diamond('flipS',  'Was SELL\nsignal?', 'decision', 'If the signal was SELL (not EXIT_LONG), flip to short after exit', 'diamond', LX.exec, 920),
+
+  // ── EXIT SHORT ──
+  node('exitShortLabel','EXIT SHORT\nbranch', 'order', 'Triggered by EXIT_SHORT signal (close > ST1)\nOR BUY signal while already short (trend flip)', 'box', LX.exec, 1060),
+  diamond('dryES',  'DRY_RUN?', 'dryrun', '', 'diamond', LX.exec, 1180),
+  node('paperES',   'paper_trading\n.close_position()', 'dryrun', 'P&L = (entry_price - exit_price) × qty', 'box', LX.exec+200, 1180),
+  diamond('synthES','is_synthetic?', 'synth', '', 'diamond', LX.exec, 1300),
+  node('synthESop', 'close_short_ce()\nor close_synthetic_short()', 'synth', 'is_short_ce=True → BUY back CE (cover)\nOtherwise 2-leg: SELL PE + BUY CE', 'box', LX.exec+200, 1300),
+  node('regES',     'close_short()\nMARKET BUY', 'order', 'Place MARKET BUY: qty = original qty\nPoll until COMPLETE', 'box', LX.exec, 1420),
+  node('clearShort','Clear state\npos = 0', 'decision', 'set_position(state, name, 0)', 'box', LX.exec, 1540),
+  diamond('flipB',  'Was BUY\nsignal?', 'decision', 'If the signal was BUY (not EXIT_SHORT), flip to long after exit', 'diamond', LX.exec, 1660),
+
+  // ── NOTIFY ──
+  node('notify',   'Notify\n(Telegram / Web)', 'dryrun', 'Sends order details, P&L summary\nUpdates Flask web dashboard', 'ellipse', LX.exec, 1780),
+]);
+
+function edge(from, to, label='', color='#4b5563', dashes=false) {
+  return { from, to, label, arrows: 'to', color: { color, highlight:'#fff' },
+           font: { color:'#9ca3af', size:10, align:'middle' },
+           smooth: { type:'curvedCW', roundness:0.1 }, dashes };
+}
+
+const edges = new vis.DataSet([
+  // startup chain
+  edge('start','init'),
+  edge('init','scrip'),
+  edge('scrip','resolve'),
+  edge('resolve','rollover'),
+  edge('rollover','scheduler'),
+
+  // scheduler → gates
+  edge('trigger','loop'),
+  edge('loop','enabled'),
+  edge('enabled','hours','yes'),
+  edge('enabled','skip','no','#ef4444'),
+  edge('hours','firstcan','yes'),
+  edge('hours','skip','no','#ef4444'),
+  edge('firstcan','market','yes'),
+  edge('firstcan','skip','no','#ef4444'),
+  edge('market','candles','yes'),
+  edge('market','skip','no','#ef4444'),
+
+  // signal calc
+  edge('candles','compute'),
+  edge('compute','lastbar'),
+  edge('lastbar','siglogic'),
+  edge('siglogic','sig4'),
+
+  // state load
+  edge('sig4','loadstate'),
+  edge('loadstate','pos0'),
+
+  // BUY signal + flat
+  edge('pos0','dryB','BUY & flat','#10b981'),
+  edge('dryB','paperLong','yes','#6b7280',true),
+  edge('dryB','synthB','no'),
+  edge('synthB','synthBuy','yes','#ec4899'),
+  edge('synthB','regBuy','no'),
+  edge('regBuy','saveLong'),
+  edge('synthBuy','saveLong'),
+  edge('paperLong','saveLong'),
+
+  // SELL signal + flat
+  edge('pos0','longOnly','SELL & flat','#ef4444'),
+  edge('longOnly','skip','yes','#ef4444'),
+  edge('longOnly','dryS','no'),
+  edge('dryS','paperShort','yes','#6b7280',true),
+  edge('dryS','synthS','no'),
+  edge('synthS','synthShort','yes','#ec4899'),
+  edge('synthS','regSell','no'),
+  edge('regSell','saveShort'),
+  edge('synthShort','saveShort'),
+  edge('paperShort','saveShort'),
+
+  // hold
+  edge('pos0','hold','None signal','#6b7280',true),
+  edge('poslong','hold','None / EXIT_SHORT','#6b7280',true),
+  edge('posshort','hold','None / EXIT_LONG','#6b7280',true),
+
+  // exit long
+  edge('poslong','exitLongLabel','EXIT_LONG\nor SELL','#f59e0b'),
+  edge('exitLongLabel','dryEL'),
+  edge('dryEL','paperEL','yes','#6b7280',true),
+  edge('dryEL','synthEL','no'),
+  edge('synthEL','synthELop','yes','#ec4899'),
+  edge('synthEL','regEL','no'),
+  edge('regEL','clearLong'),
+  edge('synthELop','clearLong'),
+  edge('paperEL','clearLong'),
+  edge('clearLong','flipS'),
+  edge('flipS','saveShort','yes → enter short','#ef4444'),
+  edge('flipS','notify','no'),
+
+  // exit short
+  edge('posshort','exitShortLabel','EXIT_SHORT\nor BUY','#3b82f6'),
+  edge('exitShortLabel','dryES'),
+  edge('dryES','paperES','yes','#6b7280',true),
+  edge('dryES','synthES','no'),
+  edge('synthES','synthESop','yes','#ec4899'),
+  edge('synthES','regES','no'),
+  edge('regES','clearShort'),
+  edge('synthESop','clearShort'),
+  edge('paperES','clearShort'),
+  edge('clearShort','flipB'),
+  edge('flipB','saveLong','yes → enter long','#10b981'),
+  edge('flipB','notify','no'),
+
+  // finish
+  edge('saveLong','notify'),
+  edge('saveShort','notify'),
+  edge('hold','notify'),
+
+  // scheduler → state
+  edge('scheduler','trigger','fires every\n15 min','#3b82f6',true),
+
+  // pos routing
+  edge('pos0','poslong','not flat'),
+  edge('poslong','posshort','not long'),
+]);
+
+const container = document.getElementById('network');
+const data = { nodes, edges };
+const options = {
+  layout: { improvedLayout: false },
+  physics: { enabled: false },
+  interaction: { hover: true, navigationButtons: true, keyboard: true, tooltipDelay: 100 },
+  nodes: { margin: 8, widthConstraint: { maximum: 180 } },
+  edges: { width: 1.5 },
+};
+
+const network = new vis.Network(container, data, options);
+
+// tooltip
+const tip = document.getElementById('tooltip');
+network.on('hoverNode', (p) => {
+  const n = nodes.get(p.node);
+  if (!n || !n.title) return;
+  tip.innerHTML = n.title.replace(/\n/g,'<br>');
+  tip.style.display = 'block';
+});
+network.on('blurNode', () => { tip.style.display = 'none'; });
+document.addEventListener('mousemove', (e) => {
+  tip.style.left = (e.clientX + 14) + 'px';
+  tip.style.top  = (e.clientY + 14) + 'px';
+});
+
+// fit on load
+network.once('afterDrawing', () => network.fit({ animation: true }));
+</script>
+</body>
+</html>

@@ -577,6 +577,47 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
 
     price = float(close_price)
 
+    # ── Booked-manually gate ──────────────────────────────────────────────────
+    # Phase 1: wait for the indicator SL/exit signal to fire naturally.
+    # Phase 2: once SL fired, wait for the next fresh entry signal.
+    # After phase 2 completes the flag is cleared and normal logic resumes.
+    bm = strategy_config.get_booked_manually(name)
+    if bm:
+        direction  = bm["direction"]
+        sl_fired   = bm["sl_fired"]
+        exit_fired = (
+            (direction == "LONG"  and signal in ("EXIT_LONG", "SELL")) or
+            (direction == "SHORT" and signal in ("EXIT_SHORT", "BUY"))
+        )
+        if not sl_fired:
+            if exit_fired:
+                strategy_config.mark_booked_manually_sl_fired(name)
+                logger.info(
+                    "%s: [MANUAL BOOK] phase 1 done — SL/exit signal %s fired; "
+                    "waiting for next entry signal",
+                    name, signal,
+                )
+            else:
+                logger.info(
+                    "%s: [MANUAL BOOK] phase 1 — waiting for SL (dir=%s, cur=%s)",
+                    name, direction, signal,
+                )
+            return
+        else:
+            # Phase 2: SL has fired, now waiting for the next entry signal
+            if signal not in ("BUY", "SELL"):
+                logger.info(
+                    "%s: [MANUAL BOOK] phase 2 — waiting for entry signal (cur=%s)",
+                    name, signal,
+                )
+                return
+            # Entry signal arrived — clear flag and fall through to normal logic
+            strategy_config.clear_booked_manually(name)
+            logger.info(
+                "%s: [MANUAL BOOK] phase 2 done — entry signal %s; resuming normal trading",
+                name, signal,
+            )
+
     # 4. Act on signal
     if DRY_RUN:
         paper_size = paper_trading.get_position_size(name)
