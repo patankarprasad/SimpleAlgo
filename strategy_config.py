@@ -46,3 +46,48 @@ def get_all(names: list[str]) -> dict[str, bool]:
     with _lock:
         cfg = _load()
         return {name: cfg.get(name, True) for name in names}
+
+
+# ── Booked-manually state ─────────────────────────────────────────────────────
+# When a user manually exits via the broker and marks the strategy "Booked
+# Manually", new entries are blocked until:
+#   Phase 1 — the natural SL/exit signal fires (sl_fired goes False → True)
+#   Phase 2 — the next valid entry signal (BUY/SELL) fires → flag cleared
+
+def get_booked_manually(name: str) -> dict | None:
+    """Return {direction, sl_fired} if this strategy is booked manually, else None."""
+    with _lock:
+        return _load().get(f"_bm_{name}")
+
+
+def set_booked_manually(name: str, direction: str) -> None:
+    """Mark strategy as booked manually. direction='LONG' or 'SHORT'."""
+    with _lock:
+        cfg = _load()
+        cfg[f"_bm_{name}"] = {"direction": direction, "sl_fired": False}
+        _save(cfg)
+
+
+def mark_booked_manually_sl_fired(name: str) -> None:
+    """Advance from phase 1 to phase 2: SL signal has now fired."""
+    with _lock:
+        cfg = _load()
+        key = f"_bm_{name}"
+        if key in cfg:
+            cfg[key]["sl_fired"] = True
+            _save(cfg)
+
+
+def clear_booked_manually(name: str) -> None:
+    """Remove the booked-manually flag, resuming normal strategy behaviour."""
+    with _lock:
+        cfg = _load()
+        cfg.pop(f"_bm_{name}", None)
+        _save(cfg)
+
+
+def get_all_booked_manually(names: list[str]) -> dict[str, dict | None]:
+    """Return {name: bm_state_or_None} for the given instrument names."""
+    with _lock:
+        cfg = _load()
+        return {name: cfg.get(f"_bm_{name}") for name in names}
