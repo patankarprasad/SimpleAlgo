@@ -11,6 +11,7 @@ Configure in .env:
 """
 import json
 import logging
+import threading
 from datetime import date, datetime
 from pathlib import Path
 
@@ -25,8 +26,8 @@ IST    = pytz.timezone("Asia/Kolkata")
 
 # ── Core send ──────────────────────────────────────────────────────────────────
 
-def _send(text: str) -> bool:
-    """Send an HTML-formatted message to the configured Telegram chat."""
+def _send_blocking(text: str) -> bool:
+    """Send an HTML-formatted message to the configured Telegram chat (blocking)."""
     token   = (config.TELEGRAM_BOT_TOKEN or "").strip()
     chat_id = (config.TELEGRAM_CHAT_ID   or "").strip()
 
@@ -52,6 +53,12 @@ def _send(text: str) -> bool:
     except Exception as exc:
         logger.warning("Telegram send failed: %s", exc)
         return False
+
+
+def _send(text: str) -> None:
+    """Fire-and-forget: submit the Telegram send to a background daemon thread."""
+    t = threading.Thread(target=_send_blocking, args=(text,), daemon=True)
+    t.start()
 
 
 # ── Scheduled notifications ────────────────────────────────────────────────────
