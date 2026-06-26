@@ -158,7 +158,7 @@ INSTRUMENTS = [
     {
         "name":                  "NIFTY",
         "exchange":              "NFO",
-        "qty":                   3,           # lot_size resolved from scrip master
+        "qty":                   2,           # lot_size resolved from scrip master
         "product":               "NRML",
         "trade_start":           "09:15",
         "trade_end":             "15:30",
@@ -224,7 +224,7 @@ HOURLY_INSTRUMENTS = [
         "name":                  "NIFTY_H",
         "underlying":            "NIFTY",
         "exchange":              "NFO",
-        "qty":                   2,
+        "qty":                   1,
         "product":               "NRML",
         "trade_start":           "09:15",
         "trade_end":             "15:30",
