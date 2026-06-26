@@ -1159,7 +1159,21 @@ if __name__ == "__main__":
     logger.info("Hourly scheduler added for NFO (fires at HH:15:05 IST)")
 
     # ── Daily Telegram notifications ───────────────────────────────────────────
-    # 08:30 — login reminder with auth server link
+    # 08:00 — automated headless Kite login; sends result via Telegram.
+    #         If it fails the 08:30 reminder prompts manual login as fallback.
+    def _auto_login_job():
+        from kite_login import auto_login
+        if config.TRADING_DAYS_ONLY and datetime.now(IST).weekday() >= 5:
+            logger.info("Auto-login skipped (weekend)")
+            return
+        success = auto_login()
+        notifier.notify_kite_auto_login(success)
+
+    scheduler.add_job(
+        _auto_login_job,
+        CronTrigger(timezone=IST, hour=8, minute=0),
+    )
+    # 08:30 — login reminder with auth server link (only fires if still not logged in)
     scheduler.add_job(
         notifier.notify_login_reminder,
         CronTrigger(timezone=IST, hour=8, minute=30),

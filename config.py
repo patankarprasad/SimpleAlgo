@@ -20,11 +20,16 @@ ANGEL_USERNAME    = os.getenv("ANGEL_USERNAME")       # Client code (e.g. A12345
 ANGEL_PIN         = os.getenv("ANGEL_PIN")            # 4-digit trading MPIN
 ANGEL_TOTP_SECRET = os.getenv("ANGEL_TOTP_SECRET")   # Base-32 TOTP secret from Angel QR setup
 
-KITE_API_KEY    = os.getenv("KITE_API_KEY")
-KITE_API_SECRET = os.getenv("KITE_API_SECRET")
-KITE_USER_ID    = os.getenv("KITE_USER_ID")
-KITE_PASSWORD   = os.getenv("KITE_PASSWORD")
-KITE_PIN        = os.getenv("KITE_PIN")
+KITE_API_KEY      = os.getenv("KITE_API_KEY")
+KITE_API_SECRET   = os.getenv("KITE_API_SECRET")
+KITE_USER_ID      = os.getenv("KITE_USER_ID")
+KITE_PASSWORD     = os.getenv("KITE_PASSWORD")
+KITE_PIN          = os.getenv("KITE_PIN")
+KITE_TOTP_SECRET  = os.getenv("KITE_TOTP_SECRET")   # Base-32 TOTP secret for automated login
+
+# ── Kite auto-login settings ───────────────────────────────────────────────────
+KITE_AUTO_LOGIN_RETRIES     = int(os.getenv("KITE_AUTO_LOGIN_RETRIES",     "3"))
+KITE_AUTO_LOGIN_RETRY_DELAY = int(os.getenv("KITE_AUTO_LOGIN_RETRY_DELAY", "5"))  # seconds
 
 # ── Data provider ──────────────────────────────────────────────────────────────
 # "angel" uses Angel SmartAPI (free).  "kite" uses Kite historical data API

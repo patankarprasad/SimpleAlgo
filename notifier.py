@@ -77,6 +77,33 @@ def _kite_logged_in() -> bool:
         return False
 
 
+def notify_kite_auto_login(success: bool, error: str = "") -> None:
+    """
+    Result of the 8:00 AM automated Kite login attempt.
+    On failure includes the manual login link so the user can act immediately.
+    """
+    if success:
+        _send(
+            f"✅ <b>Kite Auto-Login Successful</b>\n\n"
+            f"📅 {date.today().strftime('%d %b %Y')}\n"
+            f"⏰ Logged in automatically at 08:00 IST\n"
+            f"🔑 Token saved — algo is ready to trade."
+        )
+        logger.info("Telegram: Kite auto-login success notification sent")
+    else:
+        base      = (config.SERVER_BASE_URL or "").rstrip("/")
+        login_url = f"{base}/kite/login" if base else f"http://your-vps-ip:{config.KITE_AUTH_PORT}/kite/login"
+        err_line  = f"\n⚠️ Error: {error}" if error else ""
+        _send(
+            f"❌ <b>Kite Auto-Login Failed</b>\n\n"
+            f"📅 {date.today().strftime('%d %b %Y')}{err_line}\n\n"
+            f"Please log in manually before markets open:\n"
+            f'🔗 <a href="{login_url}">Open Login Page</a>\n\n'
+            f"⏰ Markets open in ~1 hour"
+        )
+        logger.warning("Telegram: Kite auto-login failure notification sent")
+
+
 def notify_login_reminder() -> None:
     """
     8:30 AM daily reminder to log in to Kite.
