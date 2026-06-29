@@ -113,20 +113,24 @@ def auto_login(
                 timeout=15,
             )
 
-            # Zerodha redirects to the app's redirect_uri with request_token.
-            # requests raises on redirect; catch the final URL from the exception.
-            try:
-                resp = session.get(
-                    f"https://kite.trade/connect/login?api_key={api_key}&v=3",
-                    timeout=15,
-                    allow_redirects=True,
-                )
-                parsed = urlparse(resp.url)
-            except Exception as redir_exc:
-                req_url = getattr(getattr(redir_exc, "request", None), "url", None)
-                if not req_url:
-                    raise
-                parsed = urlparse(req_url)
+            # Follow the OAuth redirect chain manually, stopping as soon as the
+            # Location header contains request_token.  We must NOT follow the
+            # final redirect to /callback — that route would consume the one-time
+            # token itself, leaving generate_session() with a spent token.
+            url = f"https://kite.trade/connect/login?api_key={api_key}&v=3"
+            parsed = None
+            for _ in range(15):
+                resp = session.get(url, allow_redirects=False, timeout=15)
+                location = resp.headers.get("Location", "")
+                if "request_token" in location:
+                    parsed = urlparse(location)
+                    break
+                if resp.status_code in (301, 302, 303, 307, 308) and location:
+                    url = location
+                else:
+                    break
+            if parsed is None:
+                raise RuntimeError("Could not obtain request_token from Zerodha redirect chain")
 
             query_params  = parse_qs(parsed.query)
             request_token = query_params["request_token"][0]

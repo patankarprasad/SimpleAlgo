@@ -76,6 +76,13 @@ nav a:hover,nav a.active{background:rgba(59,130,246,.15);color:var(--accent)}
           background:rgba(22,163,74,.12) !important;color:var(--green-l) !important}
 .nav-kite:hover{background:rgba(22,163,74,.25) !important}
 
+/* ── Re-login button ── */
+.relogin-btn{background:rgba(59,130,246,.15);color:var(--accent);border:1px solid rgba(59,130,246,.3);
+             border-radius:20px;font-size:0.75rem;font-weight:600;padding:4px 11px;
+             cursor:pointer;white-space:nowrap;transition:all .15s}
+.relogin-btn:hover{background:rgba(59,130,246,.3)}
+.relogin-btn:disabled{opacity:.5;cursor:wait}
+
 /* ── Layout ── */
 .content{padding:20px 16px;max-width:1200px;margin:0 auto}
 h2{font-size:1.05rem;margin-bottom:16px}
@@ -408,11 +415,20 @@ def dashboard():
     if config.DRY_RUN:
         tok_badge = '<span class="badge b-ok">&#10003; Kite token not required (DRY RUN)</span>'
     elif tok["valid"]:
-        tok_badge = '<span class="badge b-ok">&#10003; Kite token valid</span>'
+        tok_badge = (
+            '<span class="badge b-ok">&#10003; Kite token valid</span>'
+            '<button class="relogin-btn" onclick="doRelogin(this)" title="Re-run auto-login">'
+            '&#128274; Re-login</button>'
+        )
     else:
         note = f"last: {tok['date']}" if tok["date"] else "never"
-        tok_badge = (f'<span class="badge b-warn">&#9888; No Kite token '
-                     f'({note}) — <a href="/kite/login" style="color:inherit">Login</a></span>')
+        tok_badge = (
+            f'<span class="badge b-warn">&#9888; No Kite token ({note})</span>'
+            f'<button class="relogin-btn" onclick="doRelogin(this)" title="Run auto-login now">'
+            f'&#128274; Auto-login</button>'
+            f'&nbsp;<a href="/kite/login" class="badge b-neutral" style="text-decoration:none">'
+            f'&#128279; Manual login</a>'
+        )
 
     if sched["running"]:
         last = sched["last_run"].strftime("%H:%M:%S") if sched["last_run"] else "not yet"
@@ -500,6 +516,32 @@ def dashboard():
   }}
   tick(); setInterval(tick,1000);
 }})();
+function doRelogin(btn){{
+  btn.disabled=true;
+  var orig=btn.textContent;
+  btn.textContent='Logging in…';
+  fetch('/kite/relogin',{{method:'POST',headers:{{'X-Requested-With':'XMLHttpRequest'}}}})
+    .then(function(r){{return r.json();}})
+    .then(function(d){{
+      if(d.success){{
+        btn.textContent='✓ Done';
+        btn.style.background='rgba(22,163,74,.25)';
+        btn.style.color='var(--green-l)';
+        setTimeout(function(){{location.reload();}},1200);
+      }}else{{
+        btn.textContent='✗ Failed — check logs';
+        btn.style.background='rgba(220,38,38,.2)';
+        btn.style.color='var(--red-l)';
+        btn.disabled=false;
+        setTimeout(function(){{btn.textContent=orig;btn.style.background='';btn.style.color='';}},4000);
+      }}
+    }})
+    .catch(function(){{
+      btn.textContent='✗ Error';
+      btn.disabled=false;
+      setTimeout(function(){{btn.textContent=orig;btn.style.background='';btn.style.color='';}},3000);
+    }});
+}}
 </script>"""
     return _layout("Dashboard", body, active="dashboard", refresh=30)
 
@@ -1238,7 +1280,31 @@ def log_view():
     return _layout("Log", body, active="log")
 
 
-# ── Kite Login (/kite/login, /callback) ───────────────────────────────────────
+# ── Kite Login (/kite/login, /kite/relogin, /callback) ────────────────────────
+
+@app.route("/kite/relogin", methods=["POST"])
+@login_required
+def kite_relogin():
+    """Trigger auto-login from the dashboard button; returns JSON result."""
+    import threading
+    from kite_login import auto_login
+
+    result = {"success": False}
+
+    def _run():
+        ok = auto_login()
+        result["success"] = ok
+        if ok:
+            logger.info("Dashboard-triggered auto-login succeeded")
+        else:
+            logger.error("Dashboard-triggered auto-login failed")
+
+    t = threading.Thread(target=_run)
+    t.start()
+    t.join(timeout=30)   # wait up to 30 s for the login to complete
+
+    return jsonify(result)
+
 
 @app.route("/kite/login", methods=["GET"])
 @login_required
