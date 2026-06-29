@@ -278,6 +278,8 @@ STOCK_INSTRUMENTS = [
 ]
 
 # ── Session token cache paths ──────────────────────────────────────────────────
+LOGS_DIR           = os.path.join(BASE_DIR, "logs")
+LOG_FILE           = os.path.join(LOGS_DIR, "algo.log")
 KITE_TOKEN_FILE    = os.path.join(BASE_DIR, "kite_token.json")
 ANGEL_TOKEN_FILE   = os.path.join(BASE_DIR, "angel_token.json")
 STATE_FILE         = os.path.join(BASE_DIR, "positions_state.json")
