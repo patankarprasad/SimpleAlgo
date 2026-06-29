@@ -6,7 +6,7 @@ Routes
 GET  /                  Dashboard — live instrument cards + status
 GET  /positions         Current open positions with unrealized P&L
 GET  /trades            In-memory trade log for this session
-GET  /log               Last 200 lines of algo.log
+GET  /log               Last 200 lines of today's log; ?f=algo.log.DATE for archives
 GET  /kite/login        PIN form → redirects to Zerodha OAuth
 POST /kite/login        PIN verification
 GET  /callback          Zerodha OAuth callback (saves access token)
@@ -1258,22 +1258,58 @@ def trades():
 @app.route("/log")
 @login_required
 def log_view():
-    log_path = Path("algo.log")
-    if not log_path.exists():
-        body = '<div class="content"><h2>Log</h2><div class="empty">algo.log not found yet.</div></div>'
+    import glob as _glob
+
+    logs_dir = Path(config.LOGS_DIR)
+    today_log = Path(config.LOG_FILE)
+
+    # Collect available dated archive files (algo.log.YYYY-MM-DD)
+    archived = sorted(
+        [Path(p) for p in _glob.glob(str(logs_dir / "algo.log.*"))],
+        reverse=True,
+    )
+    # Build list of (label, filename) for the selector — today first
+    log_options = []
+    if today_log.exists():
+        log_options.append(("Today", today_log.name))
+    for p in archived:
+        suffix = p.suffix if p.suffix else p.name.split("algo.log")[-1]
+        label  = suffix.lstrip(".")   # e.g. "2026-06-28"
+        log_options.append((label, p.name))
+
+    # Which file is requested?
+    selected = request.args.get("f", today_log.name)
+    # Sanitise: only allow names that match algo.log* inside logs_dir
+    safe_names = {p.name for p in [today_log] + archived}
+    if selected not in safe_names:
+        selected = today_log.name
+
+    chosen_path = logs_dir / selected
+    if not chosen_path.exists():
+        body = f'<div class="content"><h2>Log</h2><div class="empty">{_html.escape(selected)} not found.</div></div>'
         return _layout("Log", body, active="log")
 
-    lines = log_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    # Last 200 lines, newest first — HTML-escaped to prevent XSS
+    lines   = chosen_path.read_text(encoding="utf-8", errors="replace").splitlines()
     content = _html.escape("\n".join(reversed(lines[-200:])))
+
+    # Build date selector options
+    opts_html = "".join(
+        f'<option value="{_html.escape(fname)}" {"selected" if fname == selected else ""}>'
+        f'{_html.escape(label)}</option>'
+        for label, fname in log_options
+    )
 
     body = f"""
 <div class="content">
-  <h2>Log
-    <span style="font-size:.78rem;font-weight:400;color:var(--muted)">
-      last 200 lines, newest first
-    </span>
-    &nbsp;<a href="/log" style="font-size:.78rem;color:var(--accent)">&#8635; Refresh</a>
+  <h2 style="display:flex;align-items:center;gap:12px;flex-wrap:wrap">
+    Log
+    <select onchange="location.href='/log?f='+this.value"
+            style="font-size:.8rem;background:var(--card);color:var(--text);
+                   border:1px solid var(--border);border-radius:6px;padding:3px 8px">
+      {opts_html}
+    </select>
+    <span style="font-size:.78rem;font-weight:400;color:var(--muted)">last 200 lines, newest first</span>
+    <a href="/log?f={_html.escape(selected)}" style="font-size:.78rem;color:var(--accent)">&#8635; Refresh</a>
   </h2>
   <pre class="log">{content}</pre>
 </div>"""

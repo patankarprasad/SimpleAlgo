@@ -25,6 +25,8 @@ from datetime import datetime, timedelta
 import pytz
 
 import config
+
+os.makedirs(config.LOGS_DIR, exist_ok=True)
 import notifier
 import paper_trading
 import scrip_master
@@ -47,13 +49,20 @@ from state import load_state, set_position, get_position
 if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(encoding="utf-8", errors="replace")
 
+from logging.handlers import TimedRotatingFileHandler
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s  %(levelname)-8s  %(name)s: %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
     handlers=[
         logging.StreamHandler(sys.stdout),
-        logging.FileHandler(os.path.join(config.BASE_DIR, "algo.log"), encoding="utf-8"),
+        TimedRotatingFileHandler(
+            config.LOG_FILE,
+            when="midnight",
+            backupCount=30,
+            encoding="utf-8",
+        ),
     ],
 )
 logger = logging.getLogger(__name__)
