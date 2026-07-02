@@ -271,6 +271,102 @@ def _check_rollover():
             notifier.notify_rollover_warning(name, old_sym, new_sym, pos)
 
 
+# ── Expiry-day handling ─────────────────────────────────────────────────────────
+
+def _expiring_today_positions(state: dict) -> list:
+    """
+    Return open, non-synthetic futures positions whose contract expires today.
+
+    Synthetic futures (CE+PE) and short-CE positions are excluded — they hold
+    options contracts, not the futures instrument itself, so the futures
+    expiry date on the resolved instrument doesn't apply to them the same way.
+    """
+    today = datetime.now(IST).date()
+    out   = []
+    for inst in RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS + RESOLVED_STOCK_INSTRUMENTS:
+        name = inst["name"]
+        pos  = get_position(state, name)
+        if pos == 0:
+            continue
+        saved = state.get(name, {})
+        if saved.get("is_synthetic") or saved.get("is_short_ce"):
+            continue
+        if inst.get("expiry") != today:
+            continue
+        out.append({
+            "instrument": inst,
+            "position":   pos,
+            "direction":  "LONG" if pos > 0 else "SHORT",
+        })
+    return out
+
+
+def _expiry_warning_job():
+    """12:30 IST — heads-up alert for any open futures position expiring today."""
+    if config.TRADING_DAYS_ONLY and datetime.now(IST).weekday() >= 5:
+        return
+    state    = load_state()
+    expiring = _expiring_today_positions(state)
+    if not expiring:
+        return
+    notifier.notify_expiry_warning([
+        {
+            "name":      e["instrument"]["name"],
+            "symbol":    e["instrument"]["kite_tradingsymbol"],
+            "direction": e["direction"],
+            "qty":       abs(e["position"]),
+        }
+        for e in expiring
+    ])
+
+
+def _expiry_squareoff_job():
+    """
+    14:45 IST — force-close any open futures position expiring today, to avoid
+    mandatory physical delivery. Runs independently of strategy signals.
+    """
+    if config.TRADING_DAYS_ONLY and datetime.now(IST).weekday() >= 5:
+        return
+    state    = load_state()
+    expiring = _expiring_today_positions(state)
+    if not expiring:
+        return
+
+    try:
+        kite = get_kite_session()
+    except RuntimeError as exc:
+        logger.critical(
+            "Expiry square-off: Kite session unavailable (%s) — %d position(s) "
+            "expiring today could NOT be closed. Manual action required.",
+            exc, len(expiring),
+        )
+        for e in expiring:
+            inst = e["instrument"]
+            notifier.notify_expiry_squareoff_failed(
+                inst["name"], inst["kite_tradingsymbol"], f"Kite session unavailable: {exc}",
+            )
+        return
+
+    for e in expiring:
+        inst   = e["instrument"]
+        name   = inst["name"]
+        symbol = inst["kite_tradingsymbol"]
+        try:
+            if e["position"] > 0:
+                close_long(kite, inst)
+            else:
+                close_short(kite, inst)
+            set_position(state, name, 0)
+            logger.warning("Expiry square-off: closed %s (%s) — expires today", name, symbol)
+            notifier.notify_expiry_squareoff(name, symbol, e["direction"], abs(e["position"]))
+        except Exception as exc:
+            logger.critical(
+                "Expiry square-off FAILED for %s (%s): %s — position still open, expires today!",
+                name, symbol, exc, exc_info=True,
+            )
+            notifier.notify_expiry_squareoff_failed(name, symbol, str(exc))
+
+
 # ── Core strategy tick ─────────────────────────────────────────────────────────
 
 def run_strategy():
@@ -1191,6 +1287,17 @@ if __name__ == "__main__":
     scheduler.add_job(
         lambda: notifier.notify_strategy_start(RESOLVED_INSTRUMENTS, dry_run=config.DRY_RUN),
         CronTrigger(timezone=IST, hour=9, minute=0),
+    )
+    # 12:30 — warn if any open futures position expires today
+    scheduler.add_job(
+        _expiry_warning_job,
+        CronTrigger(timezone=IST, hour=12, minute=30),
+    )
+    # 14:45 — force square-off any open futures position expiring today,
+    # to avoid mandatory physical delivery. Fires ahead of the 15:30 close.
+    scheduler.add_job(
+        _expiry_squareoff_job,
+        CronTrigger(timezone=IST, hour=14, minute=45),
     )
 
     scheduler.start()
