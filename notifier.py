@@ -221,6 +221,58 @@ def notify_tender_period_rollover(
     logger.warning("Telegram: tender period rollover notification sent for %s", name)
 
 
+# ── Expiry-day alerts ──────────────────────────────────────────────────────────
+
+def notify_expiry_warning(positions: list) -> None:
+    """
+    12:30 PM heads-up that some open futures positions expire today.
+    `positions` is a list of dicts: {name, symbol, direction, qty}.
+    A forced square-off follows automatically later in the afternoon.
+    """
+    lines = [
+        f"  • <b>{p['name']}</b> <code>{p['symbol']}</code> — {p['direction']} qty {p['qty']}"
+        for p in positions
+    ]
+    _send(
+        f"⏰ <b>Expiry Day — Open Positions</b>\n\n"
+        f"📅 {date.today().strftime('%d %b %Y')}\n\n"
+        f"The following futures positions expire <b>today</b>:\n\n"
+        + "\n".join(lines) +
+        f"\n\n⚠️ These will be auto squared-off at 14:45 IST to avoid "
+        f"physical delivery. Close manually before then if you want a "
+        f"different exit price."
+    )
+    logger.warning("Telegram: expiry-day warning sent for %d position(s)", len(positions))
+
+
+def notify_expiry_squareoff(name: str, symbol: str, direction: str, qty: int) -> None:
+    """Confirms a position was force-closed by the expiry-day square-off job."""
+    time_str = datetime.now(IST).strftime("%H:%M:%S IST")
+    _send(
+        f"✅ <b>Expiry Square-Off — {name}</b>\n\n"
+        f"Symbol:    <code>{symbol}</code>\n"
+        f"Direction: {direction}\n"
+        f"Qty:       {qty}\n"
+        f"Time:      {time_str}\n\n"
+        f"Closed automatically ahead of expiry to avoid physical delivery."
+    )
+    logger.info("Telegram: expiry square-off confirmation sent for %s", name)
+
+
+def notify_expiry_squareoff_failed(name: str, symbol: str, exc_msg: str) -> None:
+    """Critical alert when the expiry-day forced square-off order itself fails."""
+    time_str = datetime.now(IST).strftime("%H:%M:%S IST")
+    _send(
+        f"🚨 <b>EXPIRY SQUARE-OFF FAILED — {name}</b>\n\n"
+        f"Symbol: <code>{symbol}</code>\n"
+        f"Time:   {time_str}\n"
+        f"Error:  {exc_msg}\n\n"
+        f"⛔ Position is STILL OPEN and expires today — physical delivery risk.\n"
+        f"<b>Close this manually on Kite immediately.</b>"
+    )
+    logger.critical("Telegram: expiry square-off FAILURE alert sent for %s", name)
+
+
 # ── Trade notifications ────────────────────────────────────────────────────────
 
 _ICONS = {
