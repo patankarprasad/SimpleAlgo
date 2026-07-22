@@ -61,8 +61,10 @@ def pin_next_month(name: str, exchange: str, after_expiry: date | None = None) -
     Pin the futures contract for ``name`` on ``exchange`` whose expiry is the
     first one strictly after ``after_expiry``.
 
-    If ``after_expiry`` is None, the nearest active contract's expiry is used
-    as the reference (i.e. pin the month after whatever is currently nearest).
+    If ``after_expiry`` is None, there is no currently-resolved contract to
+    roll forward from (e.g. it already expired and failed to resolve) — in
+    that case the nearest active contract itself is pinned, rather than the
+    one after it.
 
     Returns the pinned contract dict (same keys as ``get_nearest_future()``).
     Raises ``RuntimeError`` if no suitable next contract exists.
@@ -75,11 +77,11 @@ def pin_next_month(name: str, exchange: str, after_expiry: date | None = None) -
             f"No active contracts found for {name} on {exchange}."
         )
 
-    # Determine reference expiry: caller-supplied, or nearest active contract.
-    ref_expiry = after_expiry if after_expiry is not None else contracts[0]["expiry"]
-
-    # First contract whose expiry is strictly after the reference.
-    contract = next((c for c in contracts if c["expiry"] > ref_expiry), None)
+    if after_expiry is None:
+        contract = contracts[0]
+    else:
+        # First contract whose expiry is strictly after the reference.
+        contract = next((c for c in contracts if c["expiry"] > after_expiry), None)
     if contract is None:
         raise RuntimeError(
             f"No next-month contract available for {name} on {exchange} "

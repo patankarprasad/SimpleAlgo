@@ -800,9 +800,28 @@ def instrument_rollover():
 def instrument_rollover_clear():
     """Clear the contract pin for an instrument, reverting to auto-select."""
     name = request.form.get("name", "").strip()
-    if name:
-        contract_pin.clear_pin(name)
-        logger.info("Webapp: rollover pin cleared for %s", name)
+    if not name:
+        return redirect("/")
+
+    import main as _main
+    all_instruments = (
+        _main.RESOLVED_INSTRUMENTS
+        + _main.RESOLVED_HOURLY_INSTRUMENTS
+        + _main.RESOLVED_STOCK_INSTRUMENTS
+    )
+    current = next((i for i in all_instruments if i["name"] == name), None)
+    h_cfg = next((h for h in config.HOURLY_INSTRUMENTS if h["name"] == name), None)
+    underlying = (
+        (current.get("underlying") if current else None)
+        or (h_cfg.get("underlying") if h_cfg else None)
+    )
+    pin_name = underlying if underlying else name
+
+    contract_pin.clear_pin(pin_name)
+    logger.info("Webapp: rollover pin cleared for %s", pin_name)
+    # Immediately update the in-memory resolved instrument so it reverts to
+    # auto-selecting the nearest active contract without needing a restart.
+    _main.re_resolve_instrument(pin_name)
     return redirect("/")
 
 
