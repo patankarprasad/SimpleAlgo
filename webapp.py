@@ -39,7 +39,10 @@ import paper_trading
 from angel_data import get_option_ltps
 from kite_login import get_kite_session
 from order_manager import square_off_all
-from state import load_state, save_state, set_position, get_position
+from state import (
+    load_state, set_position, get_position,
+    refresh_position, clear_position, instrument_lock,
+)
 
 IST    = pytz.timezone("Asia/Kolkata")
 logger = logging.getLogger(__name__)
@@ -716,14 +719,16 @@ def strategy_book_manually():
     name = request.form.get("name", "").strip()
     if not name:
         return redirect("/")
-    state    = load_state()
-    pos_size = get_position(state, name)
-    if pos_size == 0:
-        logger.warning("book_manually: %s has no open position in algo state — nothing to book", name)
-        return redirect("/")
-    direction = "LONG" if pos_size > 0 else "SHORT"
-    # Clear algo position state — the broker position is already closed
-    set_position(state, name, 0)
+    state = load_state()
+    with instrument_lock(name):
+        refresh_position(state, name)
+        pos_size = get_position(state, name)
+        if pos_size == 0:
+            logger.warning("book_manually: %s has no open position in algo state — nothing to book", name)
+            return redirect("/")
+        direction = "LONG" if pos_size > 0 else "SHORT"
+        # Clear algo position state — the broker position is already closed
+        set_position(state, name, 0)
     # Also clear paper position if present (DRY_RUN case)
     if paper_trading.get_position_size(name) != 0:
         snap  = web_state.snapshot()
@@ -1169,9 +1174,6 @@ def positions_sqoff():
         instruments = web_state.get_resolved_instruments()
         state       = load_state()
         square_off_all(kite, instruments, state)
-        for inst in instruments:
-            if get_position(state, inst["name"]) != 0:
-                set_position(state, inst["name"], 0)
         logger.info("Web UI: square off all triggered")
         return redirect("/positions?msg=sqoff_ok")
     except Exception as exc:
@@ -1184,10 +1186,9 @@ def positions_sqoff():
 def positions_clear_one(name: str):
     """Clear algo state for a single position (no orders placed)."""
     state = load_state()
-    if name in state:
-        del state[name]
-        save_state(state)
-        logger.info("Web UI: cleared position state for %s", name)
+    with instrument_lock(name):
+        if clear_position(state, name):
+            logger.info("Web UI: cleared position state for %s", name)
     return redirect(f"/positions?msg=cleared_{name}")
 
 
