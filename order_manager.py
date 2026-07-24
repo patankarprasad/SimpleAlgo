@@ -678,15 +678,21 @@ def close_short_ce(
 
 def square_off_all(kite: KiteConnect, resolved_instruments: list, state: dict):
     """Emergency / EOD square-off of every tracked open position."""
-    from state import get_position
+    from state import get_position, refresh_position, set_position, instrument_lock
     for instrument in resolved_instruments:
         name = instrument["name"]
-        pos  = get_position(state, name)
-        if pos > 0:
-            close_long(kite, instrument)
-        elif pos < 0:
+        # Hold the instrument lock across check+close+save so this can't race
+        # a concurrent strategy tick (or the 14:45 expiry square-off job)
+        # deciding to act on the same instrument at the same time.
+        with instrument_lock(name):
+            refresh_position(state, name)
+            pos = get_position(state, name)
+            if pos == 0:
+                continue
             saved = state.get(name, {})
-            if saved.get("is_short_ce"):
+            if pos > 0:
+                close_long(kite, instrument)
+            elif saved.get("is_short_ce"):
                 ce_sym = saved.get("ce_tradingsymbol", "")
                 if ce_sym:
                     close_short_ce(kite, instrument, ce_sym)
@@ -694,3 +700,4 @@ def square_off_all(kite: KiteConnect, resolved_instruments: list, state: dict):
                     logger.warning("square_off_all: %s is_short_ce but no ce_tradingsymbol in state", name)
             else:
                 close_short(kite, instrument)
+            set_position(state, name, 0)

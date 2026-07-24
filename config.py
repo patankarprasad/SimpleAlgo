@@ -108,7 +108,7 @@ INSTRUMENTS = [
     {
         "name":          "CRUDEOIL",
         "exchange":      "MCX",
-        "qty":           1,
+        "qty":           2,
         "contract_size": 100,       # 100 barrels/lot — PnL multiplier only (Kite order qty stays 1)
         "product":       "NRML",
         "trade_start":   "09:00",
@@ -118,7 +118,7 @@ INSTRUMENTS = [
     {
         "name":          "SILVERM",
         "exchange":      "MCX",
-        "qty":           1,
+        "qty":           2,
         "contract_size": 5,         # 5 kg/lot — PnL multiplier only (Kite order qty stays 1)
         "product":       "NRML",
         "trade_start":   "09:00",
@@ -128,7 +128,7 @@ INSTRUMENTS = [
     {
         "name":          "NATURALGAS",
         "exchange":      "MCX",
-        "qty":           1,
+        "qty":           2,
         "contract_size": 1250,      # 1250 MMBTU/lot — PnL multiplier only (Kite order qty stays 1)
         "product":       "NRML",
         "trade_start":   "09:00",
@@ -148,7 +148,7 @@ INSTRUMENTS = [
     {
         "name":          "ZINC",
         "exchange":      "MCX",
-        "qty":           1,
+        "qty":           2,
         "contract_size": 5000,      # 5000 kg/lot — PnL multiplier only (Kite order qty stays 1)
         "product":       "NRML",
         "trade_start":   "09:00",

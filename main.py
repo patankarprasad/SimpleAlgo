@@ -43,7 +43,7 @@ from order_manager import (
     close_synthetic_long, close_synthetic_short,
     place_short_ce, close_short_ce,
 )
-from state import load_state, set_position, get_position
+from state import load_state, set_position, get_position, refresh_position, instrument_lock
 
 # ── Logging setup ──────────────────────────────────────────────────────────────
 if hasattr(sys.stdout, "reconfigure"):
@@ -351,20 +351,34 @@ def _expiry_squareoff_job():
         inst   = e["instrument"]
         name   = inst["name"]
         symbol = inst["kite_tradingsymbol"]
-        try:
-            if e["position"] > 0:
-                close_long(kite, inst)
-            else:
-                close_short(kite, inst)
-            set_position(state, name, 0)
-            logger.warning("Expiry square-off: closed %s (%s) — expires today", name, symbol)
-            notifier.notify_expiry_squareoff(name, symbol, e["direction"], abs(e["position"]))
-        except Exception as exc:
-            logger.critical(
-                "Expiry square-off FAILED for %s (%s): %s — position still open, expires today!",
-                name, symbol, exc, exc_info=True,
-            )
-            notifier.notify_expiry_squareoff_failed(name, symbol, str(exc))
+        # This job is scheduled one second apart from the 14:45 strategy tick,
+        # so a concurrent _process_instrument() call for the same name is a
+        # real possibility. Lock, then re-check the position fresh — a
+        # strategy-driven exit may have already closed it since `expiring`
+        # was computed from the pre-lock snapshot above.
+        with instrument_lock(name):
+            refresh_position(state, name)
+            pos = get_position(state, name)
+            if pos == 0:
+                logger.info(
+                    "Expiry square-off: %s already flat (closed concurrently) — skipping",
+                    name,
+                )
+                continue
+            try:
+                if pos > 0:
+                    close_long(kite, inst)
+                else:
+                    close_short(kite, inst)
+                set_position(state, name, 0)
+                logger.warning("Expiry square-off: closed %s (%s) — expires today", name, symbol)
+                notifier.notify_expiry_squareoff(name, symbol, e["direction"], abs(pos))
+            except Exception as exc:
+                logger.critical(
+                    "Expiry square-off FAILED for %s (%s): %s — position still open, expires today!",
+                    name, symbol, exc, exc_info=True,
+                )
+                notifier.notify_expiry_squareoff_failed(name, symbol, str(exc))
 
 
 # ── Core strategy tick ─────────────────────────────────────────────────────────
@@ -389,7 +403,7 @@ def run_strategy():
 
     for instrument in RESOLVED_INSTRUMENTS:
         try:
-            _process_instrument(kite, state, instrument, now_ist)
+            _process_instrument_locked(kite, state, instrument, now_ist)
         except Exception as exc:
             logger.error("Error processing %s: %s", instrument["name"], exc, exc_info=True)
 
@@ -397,7 +411,7 @@ def run_strategy():
     # logged before the (potentially longer) stock loop begins.
     for instrument in RESOLVED_STOCK_INSTRUMENTS:
         try:
-            _process_instrument(kite, state, instrument, now_ist)
+            _process_instrument_locked(kite, state, instrument, now_ist)
         except Exception as exc:
             logger.error("Error processing stock future %s: %s", instrument["name"], exc, exc_info=True)
 
@@ -564,6 +578,17 @@ def _get_spot_instrument(instrument: dict) -> dict:
     return instrument
 
 
+def _process_instrument_locked(kite, state: dict, instrument: dict, now_ist):
+    """
+    Wrap _process_instrument() in a per-instrument-name lock so two
+    concurrent jobs (15-min tick, hourly tick, expiry square-off, a webapp
+    action) can never check/act/save this instrument's position at the same
+    time. Different instruments still process fully in parallel.
+    """
+    with instrument_lock(instrument["name"]):
+        _process_instrument(kite, state, instrument, now_ist)
+
+
 def _process_instrument(kite, state: dict, instrument: dict, now_ist):
     name         = instrument["name"]
     trade_start  = _parse_time(instrument["trade_start"])
@@ -643,6 +668,12 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
     last        = df_sig.iloc[-1]
     signal      = last["signal"]
     close_price = last["close"]
+    # Re-read this instrument's record from disk before deciding — `state`
+    # was loaded once at the top of the job and may be stale if a concurrent
+    # job (hourly tick, expiry square-off, a webapp action) updated this same
+    # instrument since. The caller holds instrument_lock(name) for the
+    # duration of this call, so nothing else can change it underneath us.
+    refresh_position(state, name)
     pos         = get_position(state, name)
 
     # candle_ts is the OPEN time of the bar (Angel convention).
@@ -1174,7 +1205,7 @@ def run_hourly_strategy(exchange: str | None = None):
     max_workers = min(len(instruments), 8) if instruments else 1
     with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
         futures = {
-            pool.submit(_process_instrument, kite, state, instrument, now_ist): instrument["name"]
+            pool.submit(_process_instrument_locked, kite, state, instrument, now_ist): instrument["name"]
             for instrument in instruments
         }
         for future in concurrent.futures.as_completed(futures):
