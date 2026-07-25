@@ -385,9 +385,12 @@ def _expiry_squareoff_job():
 
 def run_strategy():
     """Called at every candle close. Processes all resolved instruments."""
-    web_state.record_run()
-
     now_ist = datetime.now(IST)
+    if config.TRADING_DAYS_ONLY and now_ist.weekday() >= 5:
+        logger.info("Strategy run skipped (weekend)")
+        return
+
+    web_state.record_run()
     logger.info("=" * 64)
     logger.info("Strategy run at %s IST", now_ist.strftime("%Y-%m-%d %H:%M:%S"))
 
@@ -1182,9 +1185,12 @@ def run_hourly_strategy(exchange: str | None = None):
         exchange: If given, only process instruments on this exchange.
                   MCX instruments fire at HH:00:05; NFO instruments fire at HH:15:05.
     """
-    web_state.record_run()
-
     now_ist = datetime.now(IST)
+    if config.TRADING_DAYS_ONLY and now_ist.weekday() >= 5:
+        logger.info("Hourly strategy run skipped (weekend)")
+        return
+
+    web_state.record_run()
     logger.info("=" * 64)
     logger.info("Hourly strategy run at %s IST", now_ist.strftime("%Y-%m-%d %H:%M:%S"))
 
