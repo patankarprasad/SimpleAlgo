@@ -21,6 +21,13 @@ Notes:
       flat   + SELL → enter short  (unless long_only)
       long   + EXIT_LONG  → close long
       short  + EXIT_SHORT → close short
+  - Day-boundary gate: mirrors main.py's scheduler exactly. The live tick that
+    would evaluate a trading day's FINAL candle fires 1s after that candle
+    closes, which is already past trade_end (market closed) — so live never
+    acts on it; the position just carries into the next trading day, which is
+    evaluated fresh on its own first candle. This backtest skips signals on
+    the last candle of each day for the same reason, instead of (incorrectly)
+    filling them at that candle's close as if the market were still open.
 """
 
 import argparse
@@ -65,7 +72,7 @@ def _fetch_candles_range(angel_token: str, angel_exchange: str, interval: str,
         "fromdate":    from_dt.strftime("%Y-%m-%d %H:%M"),
         "todate":      to_dt.strftime("%Y-%m-%d %H:%M"),
     }
-    logger.info("  Fetching %-30s | %s → %s", label, from_dt.strftime("%Y-%m-%d"), to_dt.strftime("%Y-%m-%d"))
+    logger.info("  Fetching %-30s | %s -> %s", label, from_dt.strftime("%Y-%m-%d"), to_dt.strftime("%Y-%m-%d"))
 
     time.sleep(config.ANGEL_BASE_DELAY)
     resp = angel.getCandleData(params)
@@ -173,7 +180,7 @@ def fetch_historical_data(inst_cfg: dict, from_date: date, to_date: date) -> pd.
     full_df  = full_df[~full_df.index.duplicated(keep="first")]
 
     logger.info(
-        "  %s: %d candles total  (%s → %s)",
+        "  %s: %d candles total  (%s -> %s)",
         base_name, len(full_df),
         full_df.index[0].strftime("%Y-%m-%d"),
         full_df.index[-1].strftime("%Y-%m-%d"),
@@ -254,6 +261,21 @@ def simulate_strategy(inst_cfg: dict, df: pd.DataFrame) -> list[dict]:
             entry_px = 0.0
             entry_ts = None
             entry_exp = None
+
+        # ── Day-boundary gate ────────────────────────────────────────────────
+        # ts is the candle's OPEN time. If the next candle falls on a different
+        # calendar date (or this is the last row in the data), this bar is the
+        # final candle of its trading day. Live's scheduler tick for this bar
+        # fires 1s after it closes — already past trade_end — so live never
+        # evaluates it; the position just carries into tomorrow's first candle.
+        # Skip signal processing here so the backtest doesn't fill a trade at
+        # a price the live system could never actually have gotten.
+        is_last_of_day = (
+            idx == len(df_s) - 1
+            or df_s.index[idx + 1].date() != ts.date()
+        )
+        if is_last_of_day:
+            continue
 
         # ── Signal processing ──────────────────────────────────────────────
         if position == 0:
