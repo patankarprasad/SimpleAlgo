@@ -98,6 +98,42 @@ def sma(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(period).mean()
 
 
+def heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Convert regular OHLC candles to Heikin Ashi candles.
+
+    ha_close = (O+H+L+C)/4
+    ha_open  = (prev ha_open + prev ha_close)/2   (seeded with (open+close)/2 on bar 0)
+    ha_high  = max(H, ha_open, ha_close)
+    ha_low   = min(L, ha_open, ha_close)
+
+    Returns a copy of df with open/high/low/close REPLACED by the HA values.
+    The original close is preserved in a new 'real_close' column so callers
+    can still fill trades at the actual tradable price.
+    """
+    o, h, l, c = df["open"], df["high"], df["low"], df["close"]
+
+    ha_close = (o + h + l + c) / 4.0
+
+    ha_open = np.full(len(df), np.nan)
+    ha_open[0] = (o.iloc[0] + c.iloc[0]) / 2.0
+    ha_close_vals = ha_close.values
+    for i in range(1, len(df)):
+        ha_open[i] = (ha_open[i - 1] + ha_close_vals[i - 1]) / 2.0
+    ha_open = pd.Series(ha_open, index=df.index)
+
+    ha_high = pd.concat([h, ha_open, ha_close], axis=1).max(axis=1)
+    ha_low  = pd.concat([l, ha_open, ha_close], axis=1).min(axis=1)
+
+    out = df.copy()
+    out["real_close"] = c
+    out["open"]  = ha_open
+    out["high"]  = ha_high
+    out["low"]   = ha_low
+    out["close"] = ha_close
+    return out
+
+
 def compute_signals(df: pd.DataFrame, st1_period: int, st1_factor: float,
                     st2_period: int, st2_factor: float, ma_length: int) -> pd.DataFrame:
     """
