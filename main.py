@@ -683,11 +683,18 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
     # Close time = candle_ts + interval (e.g. 17:00 candle closes at 17:15).
     candle_ts = df_sig.index[-1]
 
+    # In DRY_RUN the decision below is driven by the PAPER book, not
+    # positions_state.json — log that one, otherwise the line reads "pos=0"
+    # on the very tick it reports "[PAPER] holding LONG", which makes
+    # reconciling a paper run against a backtest impossible.
+    logged_pos = paper_trading.get_position_size(name) if DRY_RUN else pos
+
     logger.info(
-        "%s | kite=%-20s | candle=%s | close=%.2f  st1=%.2f  st2=%.2f  ma=%.2f | signal=%-12s pos=%d",
+        "%s | kite=%-20s | candle=%s | close=%.2f  st1=%.2f  st2=%.2f  ma=%.2f | signal=%-12s pos=%d%s",
         name, instrument["kite_tradingsymbol"],
         candle_ts.strftime("%Y-%m-%d %H:%M"),
-        close_price, last["st1"], last["st2"], last["ma"], signal, pos,
+        close_price, last["st1"], last["st2"], last["ma"], signal, logged_pos,
+        " [paper]" if DRY_RUN else "",
     )
 
     # 3. Push latest snapshot to the web dashboard

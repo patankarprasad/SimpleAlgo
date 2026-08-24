@@ -135,12 +135,26 @@ def heikin_ashi(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def compute_signals(df: pd.DataFrame, st1_period: int, st1_factor: float,
-                    st2_period: int, st2_factor: float, ma_length: int) -> pd.DataFrame:
+                    st2_period: int, st2_factor: float, ma_length: int,
+                    exit_st: str = "st1") -> pd.DataFrame:
     """
     Add indicator columns to df and return the last row's signal summary.
     Returns the full df with added columns: st1, st2, ma, signal
       signal: 'BUY' | 'SELL' | 'EXIT_LONG' | 'EXIT_SHORT' | None
+
+    `exit_st` selects which Supertrend acts as the stop:
+      "st1" (default) — the live system's behaviour, exit on the tighter band
+      "st2"           — exit on the wider band, a looser stop
+
+    Entry conditions are unaffected either way; a BUY still requires price
+    above BOTH supertrends and the MA. Because a larger factor pushes the
+    band further from price (lower in an uptrend, higher in a downtrend),
+    ST2 at 10/3.0 is always the wider of the two, so exiting on it holds
+    positions through pullbacks that would stop out against ST1 at 10/2.0.
     """
+    if exit_st not in ("st1", "st2"):
+        raise ValueError(f"exit_st must be 'st1' or 'st2', got {exit_st!r}")
+
     df = df.copy()
     df["st1"] = supertrend(df, st1_period, st1_factor)
     df["st2"] = supertrend(df, st2_period, st2_factor)
@@ -151,10 +165,12 @@ def compute_signals(df: pd.DataFrame, st1_period: int, st1_factor: float,
     st2 = df["st2"]
     ma  = df["ma"]
 
+    stop = st1 if exit_st == "st1" else st2
+
     buy_cond  = (c > st1) & (c > st2) & (c > ma)
     sell_cond = (c < st1) & (c < st2) & (c < ma)
-    exit_long  = c < st1
-    exit_short = c > st1
+    exit_long  = c < stop
+    exit_short = c > stop
 
     conditions = [buy_cond, sell_cond, exit_long, exit_short]
     choices    = ["BUY",    "SELL",    "EXIT_LONG", "EXIT_SHORT"]

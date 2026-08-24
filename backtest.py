@@ -45,12 +45,25 @@ from indicators import compute_signals
 import scrip_master as sm
 
 # ──────────────────────────────────────────────────────────────────────────────
+# The report uses ₹ and → . On Windows the console defaults to cp1252, which
+# cannot encode either, and both the log line and print_report() die with
+# UnicodeEncodeError. Force UTF-8 on the streams before any output happens.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        pass
+
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
     handlers=[logging.StreamHandler(sys.stdout)],
 )
 logger = logging.getLogger("backtest")
+
+# Approximate length of one expiry cycle. Candles older than this before a
+# contract's expiry come from a period when it was NOT the front month.
+FRONT_MONTH_DAYS = 35
 
 # Suppress noisy sub-module loggers
 for _mod in ("angel_login", "scrip_master", "urllib3", "requests"):
@@ -98,8 +111,13 @@ def _fetch_candles_range(angel_token: str, angel_exchange: str, interval: str,
 
 def _get_all_contracts(name: str, exchange: str) -> list[dict]:
     """
-    Return ALL futures contracts for this instrument from the scrip master,
-    including expired ones, sorted by expiry (oldest first).
+    Return every futures contract for this instrument that the scrip master
+    currently lists, sorted by expiry (oldest first).
+
+    NOTE: brokers publish only LIVE contracts — expired ones are absent. So
+    for a lookback longer than the front-month contract's own life this will
+    not return the contracts that were actually front-month back then. See
+    _warn_if_far_month() for why that matters.
     """
     merged = sm._get_merged()
     mask = (
@@ -108,6 +126,33 @@ def _get_all_contracts(name: str, exchange: str) -> list[dict]:
     )
     subset = merged[mask].sort_values("expiry_date")
     return [sm._row_to_dict(r) for _, r in subset.iterrows()]
+
+
+def _warn_if_far_month(base_name: str, contract: dict, fetch_from: date) -> None:
+    """
+    Warn when we are about to backtest a stretch during which this contract was
+    NOT the front month.
+
+    Live always trades the nearest expiry (scrip_master.get_nearest_future), so
+    any candles older than roughly one expiry cycle before this contract's own
+    expiry come from a far-month, thinly-traded book that the live system would
+    never have acted on. Because brokers drop expired contracts from the scrip
+    master, we cannot substitute the correct front-month data — the honest move
+    is to say so loudly rather than report the results as if they were tradable.
+    """
+    front_month_start = contract["expiry"] - timedelta(days=FRONT_MONTH_DAYS)
+    if fetch_from >= front_month_start:
+        return
+    stale_days = (front_month_start - fetch_from).days
+    logger.warning(
+        "  %s: contract %s only became front-month around %s, but data is "
+        "requested from %s — the first ~%d day(s) come from a far-month, "
+        "illiquid book that live would never have traded. Expired contracts "
+        "are not in the scrip master, so this span cannot be reconstructed. "
+        "Treat results before %s as unreliable.",
+        base_name, contract.get("angel_symbol", contract["expiry"]),
+        front_month_start, fetch_from, stale_days, front_month_start,
+    )
 
 
 def fetch_historical_data(inst_cfg: dict, from_date: date, to_date: date) -> pd.DataFrame:
@@ -154,6 +199,8 @@ def fetch_historical_data(inst_cfg: dict, from_date: date, to_date: date) -> pd.
 
         if fetch_from > fetch_to:
             continue
+
+        _warn_if_far_month(base_name, contract, fetch_from.date())
 
         label = f"{base_name} (exp {contract['expiry']})"
         df_c = _fetch_candles_range(
@@ -205,17 +252,36 @@ def _pnl_multiplier(inst_cfg: dict) -> float:
     return inst_cfg.get("_lot_size", 1) * inst_cfg.get("qty", 1)
 
 
-def simulate_strategy(inst_cfg: dict, df: pd.DataFrame) -> list[dict]:
+def simulate_strategy(inst_cfg: dict, df: pd.DataFrame,
+                      slippage_bps: float = 0.0,
+                      exit_st: str = "st1") -> list[dict]:
     """
-    Walk through every bar and simulate the strategy in live-system order:
+    Walk through every bar and simulate the strategy in live-system order,
+    mirroring main.py's signal-action block exactly:
 
         flat   + BUY        → enter long
         flat   + SELL       → enter short  (skipped if long_only=True)
         long   + EXIT_LONG  → close long
         short  + EXIT_SHORT → close short
+        long   + SELL       → close long, then REVERSE to short (same bar)
+        short  + BUY        → close short, then REVERSE to long  (same bar)
+
+    The two reversal cases matter: `BUY` is a strict subset of `EXIT_SHORT`
+    (c>st1 & c>st2 & c>ma  vs  c>st1) and compute_signals() emits only the
+    first match, never both. So a short that receives BUY must be flipped
+    here — live does exactly that (main.py: `signal in ("EXIT_SHORT","BUY")
+    and pos < 0`, followed by place_buy). Treating BUY-while-short as a
+    no-op holds losing shorts far longer than live ever would.
 
     On contract rollover (contract_expiry changes), any open position is
     force-closed at that bar's close price and re-opened if signal warrants.
+
+    `exit_st` picks which Supertrend is the stop: "st1" (10/2.0, what live
+    runs) or "st2" (10/3.0, a wider stop). Entries are identical either way.
+
+    `slippage_bps` charges an adverse fill on BOTH legs of every trade:
+    buys fill above the close, sells below it. Live sends MARKET orders
+    (order_manager.place_buy), so a close-price fill is optimistic.
 
     Returns a list of trade dicts.
     """
@@ -233,6 +299,7 @@ def simulate_strategy(inst_cfg: dict, df: pd.DataFrame) -> list[dict]:
         config.ST1_PERIOD, config.ST1_FACTOR,
         config.ST2_PERIOD, config.ST2_FACTOR,
         config.MA_LENGTH,
+        exit_st=exit_st,
     )
 
     mult     = _pnl_multiplier(inst_cfg)
@@ -241,6 +308,10 @@ def simulate_strategy(inst_cfg: dict, df: pd.DataFrame) -> list[dict]:
     entry_ts = None
     entry_exp = None
     trades   = []
+
+    def _fill(px: float, side: int) -> float:
+        """Adverse market-order fill: +slippage when buying, -slippage when selling."""
+        return px * (1.0 + side * slippage_bps / 10_000.0)
 
     for idx, (ts, row) in enumerate(df_s.iterrows()):
         # Skip warmup: need at least MA_LENGTH bars for valid signals
@@ -254,9 +325,10 @@ def simulate_strategy(inst_cfg: dict, df: pd.DataFrame) -> list[dict]:
 
         # ── Contract rollover: force-close and re-evaluate ─────────────────
         if position != 0 and entry_exp is not None and exp != entry_exp:
-            pnl = (close - entry_px) * position * mult
+            exit_px = _fill(close, -position)
+            pnl = (exit_px - entry_px) * position * mult
             trades.append(_make_trade(inst_cfg["name"], position, entry_ts, entry_px,
-                                      ts, close, pnl, "ROLLOVER", entry_exp))
+                                      ts, exit_px, pnl, "ROLLOVER", entry_exp))
             position = 0
             entry_px = 0.0
             entry_ts = None
@@ -277,47 +349,52 @@ def simulate_strategy(inst_cfg: dict, df: pd.DataFrame) -> list[dict]:
         if is_last_of_day:
             continue
 
-        # ── Signal processing ──────────────────────────────────────────────
-        if position == 0:
-            if in_hrs and signal == "BUY":
+        # ── Signal processing (mirrors main.py's signal-action block) ──────
+        # Exits first, then a same-bar reversal if the signal is a fresh entry
+        # in the opposite direction — exactly what live does.
+        if position > 0 and signal in ("EXIT_LONG", "SELL"):
+            exit_px = _fill(close, -1)
+            pnl = (exit_px - entry_px) * mult
+            trades.append(_make_trade(inst_cfg["name"], +1, entry_ts, entry_px,
+                                      ts, exit_px, pnl, signal, entry_exp))
+            position  = 0
+            entry_px  = 0.0
+            entry_ts  = None
+            entry_exp = None
+
+        elif position < 0 and signal in ("EXIT_SHORT", "BUY"):
+            exit_px = _fill(close, +1)
+            pnl = (entry_px - exit_px) * mult
+            trades.append(_make_trade(inst_cfg["name"], -1, entry_ts, entry_px,
+                                      ts, exit_px, pnl, signal, entry_exp))
+            position  = 0
+            entry_px  = 0.0
+            entry_ts  = None
+            entry_exp = None
+
+        # Entry — reached either flat, or immediately after the exit above
+        # closed the opposite side on this same bar (the reversal case).
+        if position == 0 and in_hrs:
+            if signal == "BUY":
                 position  = +1
-                entry_px  = close
+                entry_px  = _fill(close, +1)
                 entry_ts  = ts
                 entry_exp = exp
-            elif in_hrs and signal == "SELL" and not long_only:
+            elif signal == "SELL" and not long_only:
                 position  = -1
-                entry_px  = close
+                entry_px  = _fill(close, -1)
                 entry_ts  = ts
                 entry_exp = exp
-
-        elif position > 0:
-            if signal == "EXIT_LONG":
-                pnl = (close - entry_px) * mult
-                trades.append(_make_trade(inst_cfg["name"], +1, entry_ts, entry_px,
-                                          ts, close, pnl, signal, entry_exp))
-                position = 0
-                entry_px = 0.0
-                entry_ts = None
-                entry_exp = None
-
-        else:  # position < 0
-            if signal == "EXIT_SHORT":
-                pnl = (entry_px - close) * mult
-                trades.append(_make_trade(inst_cfg["name"], -1, entry_ts, entry_px,
-                                          ts, close, pnl, signal, entry_exp))
-                position = 0
-                entry_px = 0.0
-                entry_ts = None
-                entry_exp = None
 
     # ── Close any position open at end of data ─────────────────────────────
     if position != 0:
         ts    = df_s.index[-1]
         close = float(df_s.iloc[-1]["close"])
         exp   = df_s.iloc[-1].get("contract_expiry")
-        pnl   = (close - entry_px) * position * mult
+        exit_px = _fill(close, -position)
+        pnl   = (exit_px - entry_px) * position * mult
         trades.append(_make_trade(inst_cfg["name"], position, entry_ts, entry_px,
-                                  ts, close, pnl, "END_OF_DATA", entry_exp))
+                                  ts, exit_px, pnl, "END_OF_DATA", entry_exp))
 
     return trades
 
@@ -486,6 +563,18 @@ def main():
     parser.add_argument("--hourly",      action="store_true",    help="Include hourly instruments")
     parser.add_argument("--all",         action="store_true",    help="Include both 15-min and hourly instruments")
     parser.add_argument("--no-save",     action="store_true",    help="Skip saving results to CSV")
+    parser.add_argument(
+        "--exit-st", choices=["st1", "st2"], default="st1",
+        help="Which Supertrend acts as the stop-loss: st1 = 10/2.0 (live's "
+             "behaviour, default), st2 = 10/3.0 (wider stop). Entry rules "
+             "are unchanged in both cases.",
+    )
+    parser.add_argument(
+        "--slippage-bps", type=float, default=0.0,
+        help="Adverse fill charged on BOTH legs of every trade, in basis points "
+             "of price (live sends MARKET orders, so a close-price fill is "
+             "optimistic). Default 0 = not modelled.",
+    )
     args = parser.parse_args()
 
     to_date   = date.today()
@@ -506,6 +595,16 @@ def main():
 
     logger.info("═" * 60)
     logger.info("Backtesting %d instrument(s) | %s → %s", len(instruments), from_date, to_date)
+    logger.info(
+        "Stop-loss: %s",
+        "ST1 10/2.0 (live default)" if args.exit_st == "st1"
+        else "ST2 10/3.0 (wider stop — VARIATION, not what live runs)",
+    )
+    logger.info(
+        "Slippage: %s",
+        f"{args.slippage_bps:g} bps per leg" if args.slippage_bps
+        else "0 bps — NOT modelled (live uses MARKET orders; results are optimistic)",
+    )
     logger.info("═" * 60)
 
     # Refresh scrip master once
@@ -517,7 +616,9 @@ def main():
         logger.info("── %s ─────────────────────────────────", name)
         try:
             df     = fetch_historical_data(inst_cfg, from_date, to_date)
-            trades = simulate_strategy(inst_cfg, df)
+            trades = simulate_strategy(inst_cfg, df,
+                                       slippage_bps=args.slippage_bps,
+                                       exit_st=args.exit_st)
             stats  = compute_stats(trades)
             results[name] = {"trades": trades, "stats": stats}
             logger.info(

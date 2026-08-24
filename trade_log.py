@@ -48,7 +48,7 @@ def list_dates() -> list[str]:
     if not TRADES_DIR.exists():
         return []
     return sorted(
-        (p.stem for p in TRADES_DIR.glob("????.??.??.json")),
+        (p.stem for p in TRADES_DIR.glob("????-??-??.json")),
         reverse=True,
     )
 
