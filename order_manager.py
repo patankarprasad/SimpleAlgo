@@ -15,8 +15,55 @@ import logging
 import time
 
 from kiteconnect import KiteConnect
+from kiteconnect.exceptions import InputException, PermissionException, TokenException
 
 logger = logging.getLogger(__name__)
+
+
+class OrderFailed(RuntimeError):
+    """The order definitively did NOT execute (REJECTED/CANCELLED, zero filled).
+
+    Safe to treat as "nothing happened": state must not change, and re-sending
+    the same order later cannot double a position.
+    """
+    def __init__(self, message: str, order_id: str | None = None):
+        super().__init__(message)
+        self.order_id = order_id
+
+
+class OrderStatusUnknown(RuntimeError):
+    """The order's outcome could NOT be confirmed — it MAY have executed.
+
+    Neither "assume filled" nor "assume not filled" is safe: assuming not-filled
+    re-enters and doubles the position; assuming filled fabricates a position
+    that a later exit would turn into a naked opposite trade. Callers must stop
+    trading the instrument and require a human to reconcile against Kite.
+    """
+    def __init__(self, message: str, order_id: str | None = None,
+                 last_status: str = "", filled_quantity: int = 0):
+        super().__init__(message)
+        self.order_id        = order_id
+        self.last_status     = last_status
+        self.filled_quantity = filled_quantity
+
+
+class SyntheticPartialFill(RuntimeError):
+    """One leg of a two-leg synthetic order executed but the other did not
+    (or its outcome is unknown). The instrument must be halted: re-running the
+    whole entry/exit re-fires the already-executed leg every tick."""
+    def __init__(self, message: str, *, filled_leg: str = "",
+                 failed_leg: str = "", outcome_unknown: bool = False):
+        super().__init__(message)
+        self.filled_leg      = filled_leg
+        self.failed_leg      = failed_leg
+        self.outcome_unknown = outcome_unknown
+
+
+# Exceptions from the placement call itself that guarantee the order never
+# reached the exchange (validation / auth / permission rejections). Anything
+# else (network timeout, 5xx, parse error) leaves the outcome ambiguous — the
+# request may have been accepted even though the response never arrived.
+_DEFINITE_PLACEMENT_FAILURES = (InputException, TokenException, PermissionException)
 
 
 def _is_circuit_limit_error(exc: Exception) -> bool:
@@ -38,6 +85,27 @@ def _place_order(kite: KiteConnect, **kwargs) -> str:
     return kite._post("order.place", url_args={"variety": variety}, params=params)["order_id"]
 
 
+def _place_order_checked(kite: KiteConnect, **kwargs) -> str:
+    """
+    _place_order, but with error outcomes classified.
+
+    Validation/auth rejections re-raise unchanged (definitively not placed —
+    callers like the tender-period fallback rely on seeing InputException).
+    Any other error becomes OrderStatusUnknown: the POST may have gone through
+    even though we never saw the order_id, so the order could be live on Kite.
+    """
+    try:
+        return _place_order(kite, **kwargs)
+    except _DEFINITE_PLACEMENT_FAILURES:
+        raise
+    except Exception as exc:
+        raise OrderStatusUnknown(
+            f"order placement outcome unknown ({kwargs.get('transaction_type')} "
+            f"{kwargs.get('tradingsymbol')}): {exc} — the order may be live on "
+            f"Kite without a confirmed order_id",
+        ) from exc
+
+
 def _order_qty(instrument: dict) -> int:
     """Total units = lots × lot_size (both come from the resolved instrument dict)."""
     return instrument["qty"] * instrument["lot_size"]
@@ -48,64 +116,83 @@ def _await_order_complete(
     order_id: str,
     label: str,
     *,
-    retries: int = 8,
-    delay: float = 0.5,
+    timeout: float = 45.0,
 ) -> None:
     """
     Poll Kite order history until the order reaches a terminal status.
 
-    For MARKET orders this normally resolves in < 1 s; we allow up to
-    retries × delay seconds before giving up.
+    MARKET orders normally resolve in < 1 s; the long timeout only matters when
+    the order stays OPEN or order_history itself keeps erroring. Polling starts
+    at 0.5 s intervals and backs off to 5 s.
 
-    Raises RuntimeError if:
-      - order status is REJECTED or CANCELLED, or
-      - COMPLETE is not seen within the retry window.
+    Raises:
+      OrderFailed        — REJECTED/CANCELLED with nothing filled (definitive:
+                           the order did not execute, state must not change).
+      OrderStatusUnknown — anything else: COMPLETE never observed within the
+                           window, polls kept failing, or a terminal status
+                           arrived with a partial fill. The order MAY have
+                           executed; the caller must halt the instrument
+                           rather than guess.
     """
-    terminal_ok  = {"COMPLETE"}
-    terminal_bad = {"REJECTED", "CANCELLED"}
+    deadline    = time.monotonic() + timeout
+    delay       = 0.5
+    last_status = ""
+    filled      = 0
 
-    for attempt in range(retries):
+    while True:
         try:
             history = kite.order_history(order_id)
             if history:
-                last   = history[-1]
-                status = last.get("status", "")
-                if status in terminal_ok:
+                last        = history[-1]
+                last_status = last.get("status", "")
+                filled      = int(last.get("filled_quantity") or 0)
+                if last_status == "COMPLETE":
                     logger.info(
                         "Order COMPLETE | %s | order_id=%s | avg_price=%.4f | filled=%d",
                         label, order_id,
-                        last.get("average_price", 0.0),
-                        last.get("filled_quantity", 0),
+                        last.get("average_price", 0.0), filled,
                     )
                     return
-                if status in terminal_bad:
+                if last_status in ("REJECTED", "CANCELLED"):
                     reason = (
                         last.get("status_message")
                         or last.get("status_message_raw")
-                        or status
+                        or last_status
                     )
-                    raise RuntimeError(
-                        f"Order {status} for {label} (id={order_id}): {reason}"
+                    if filled > 0:
+                        # e.g. CANCELLED after a partial fill: `filled` units
+                        # ARE held at the broker but state assumes all-or-nothing
+                        raise OrderStatusUnknown(
+                            f"Order {last_status} for {label} (id={order_id}) "
+                            f"after PARTIAL fill of {filled} units: {reason} — "
+                            f"broker position differs from expected, reconcile on Kite",
+                            order_id=order_id, last_status=last_status,
+                            filled_quantity=filled,
+                        )
+                    raise OrderFailed(
+                        f"Order {last_status} for {label} (id={order_id}): {reason}",
+                        order_id=order_id,
                     )
-                # Still OPEN / TRIGGER PENDING — keep polling
-                logger.debug(
-                    "Order status=%s, waiting… (attempt %d/%d) | %s",
-                    status, attempt + 1, retries, label,
-                )
-        except RuntimeError:
+                # Still OPEN / TRIGGER PENDING / VALIDATION PENDING — keep polling
+                logger.debug("Order status=%s, waiting… | %s", last_status, label)
+        except (OrderFailed, OrderStatusUnknown):
             raise
         except Exception as exc:
             logger.warning(
-                "order_history poll failed (attempt %d/%d) for %s [id=%s]: %s",
-                attempt + 1, retries, label, order_id, exc,
+                "order_history poll failed for %s [id=%s]: %s",
+                label, order_id, exc,
             )
 
-        if attempt < retries - 1:
-            time.sleep(delay)
+        if time.monotonic() + delay > deadline:
+            break
+        time.sleep(delay)
+        delay = min(delay * 1.6, 5.0)
 
-    raise RuntimeError(
-        f"Order {order_id} for {label} did not reach COMPLETE within "
-        f"{retries * delay:.1f}s — check Kite manually"
+    raise OrderStatusUnknown(
+        f"Order {order_id} for {label} could not be confirmed within {timeout:.0f}s "
+        f"(last status={last_status or 'unavailable'!r}, filled={filled}) — "
+        f"it may still execute; check Kite manually",
+        order_id=order_id, last_status=last_status, filled_quantity=filled,
     )
 
 
@@ -123,6 +210,51 @@ def _fetch_ltp(kite: KiteConnect, instrument: dict) -> float:
         return 0.0
 
 
+def _leg_params(kite: KiteConnect, *, exchange: str, tradingsymbol: str,
+                transaction_type: str, quantity: int, product: str) -> dict:
+    """Build the _place_order kwargs for one MARKET order leg."""
+    return dict(
+        variety          = kite.VARIETY_REGULAR,
+        exchange         = exchange,
+        tradingsymbol    = tradingsymbol,
+        transaction_type = transaction_type,
+        quantity         = quantity,
+        order_type       = kite.ORDER_TYPE_MARKET,
+        product          = product,
+    )
+
+
+def _place_leg(kite: KiteConnect, label: str, *, allow_retry: bool = True,
+               **params) -> str:
+    """
+    Place one option leg and confirm it filled.
+
+    A DEFINITIVE no-fill failure (rejected/cancelled with nothing filled, or a
+    validation error before the exchange) is retried once — safe, because
+    nothing executed. An UNKNOWN outcome is never retried: the first order may
+    have filled, and re-sending it is exactly how legs get doubled (as on the
+    2026-08-27 NIFTY_H partial exit).
+    """
+    try:
+        order_id = _place_order_checked(kite, **params)
+        logger.info("%s placed | order_id=%s | qty=%s",
+                    label, order_id, params.get("quantity"))
+        _await_order_complete(kite, order_id, label)
+        return order_id
+    except OrderStatusUnknown:
+        raise
+    except (OrderFailed, *_DEFINITE_PLACEMENT_FAILURES) as exc:
+        if not allow_retry:
+            raise
+        logger.warning("%s: definitive failure (%s) — retrying leg once in 2s",
+                       label, exc)
+        time.sleep(2)
+        order_id = _place_order_checked(kite, **params)
+        logger.info("%s placed on retry | order_id=%s", label, order_id)
+        _await_order_complete(kite, order_id, label)
+        return order_id
+
+
 def place_buy(kite: KiteConnect, instrument: dict) -> str:
     """Open a long (BUY) position. Retries once on circuit-limit rejection."""
     if kite is None:
@@ -138,7 +270,7 @@ def place_buy(kite: KiteConnect, instrument: dict) -> str:
     )
 
     for attempt in range(2):
-        order_id = _place_order(kite,
+        order_id = _place_order_checked(kite,
             variety           = kite.VARIETY_REGULAR,
             exchange          = instrument["exchange"],
             tradingsymbol     = instrument["kite_tradingsymbol"],
@@ -154,6 +286,10 @@ def place_buy(kite: KiteConnect, instrument: dict) -> str:
         try:
             _await_order_complete(kite, order_id, label)
             return order_id
+        except OrderStatusUnknown:
+            # The order may have filled (including a partial fill whose reason
+            # text could mention circuit limits) — never re-send it.
+            raise
         except RuntimeError as exc:
             if attempt == 0 and _is_circuit_limit_error(exc):
                 ltp = _fetch_ltp(kite, instrument)
@@ -181,7 +317,7 @@ def place_sell(kite: KiteConnect, instrument: dict) -> str:
     )
 
     for attempt in range(2):
-        order_id = _place_order(kite,
+        order_id = _place_order_checked(kite,
             variety           = kite.VARIETY_REGULAR,
             exchange          = instrument["exchange"],
             tradingsymbol     = instrument["kite_tradingsymbol"],
@@ -197,6 +333,10 @@ def place_sell(kite: KiteConnect, instrument: dict) -> str:
         try:
             _await_order_complete(kite, order_id, label)
             return order_id
+        except OrderStatusUnknown:
+            # The order may have filled (including a partial fill whose reason
+            # text could mention circuit limits) — never re-send it.
+            raise
         except RuntimeError as exc:
             if attempt == 0 and _is_circuit_limit_error(exc):
                 ltp = _fetch_ltp(kite, instrument)
@@ -214,7 +354,7 @@ def close_long(kite: KiteConnect, instrument: dict) -> str:
     if kite is None:
         raise RuntimeError(f"Kite session unavailable — EXIT LONG order not placed for {instrument['name']}")
     qty      = _order_qty(instrument)
-    order_id = _place_order(kite,
+    order_id = _place_order_checked(kite,
         variety           = kite.VARIETY_REGULAR,
         exchange          = instrument["exchange"],
         tradingsymbol     = instrument["kite_tradingsymbol"],
@@ -236,7 +376,7 @@ def close_short(kite: KiteConnect, instrument: dict) -> str:
     if kite is None:
         raise RuntimeError(f"Kite session unavailable — EXIT SHORT order not placed for {instrument['name']}")
     qty      = _order_qty(instrument)
-    order_id = _place_order(kite,
+    order_id = _place_order_checked(kite,
         variety           = kite.VARIETY_REGULAR,
         exchange          = instrument["exchange"],
         tradingsymbol     = instrument["kite_tradingsymbol"],
@@ -288,10 +428,10 @@ def place_synthetic_buy(
     Open a long synthetic future: BUY CE + SELL PE.
 
     Returns (ce_order_id, pe_order_id, entry_ce_ltp, entry_pe_ltp).
-    If Leg 2 (SELL PE) fails after Leg 1 (BUY CE) has been placed, a CRITICAL
-    log is emitted and RuntimeError is raised so the caller does NOT persist
-    position state (preventing phantom positions). Manual Kite intervention
-    is required to close the orphaned CE leg.
+    Leg 1 is confirmed filled before Leg 2 is placed. If Leg 2 (SELL PE)
+    definitively fails it is retried once; if it still fails (or its outcome
+    is unknown), SyntheticPartialFill is raised so the caller HALTS the
+    instrument — re-running the entry would buy another CE every tick.
     """
     if kite is None:
         raise RuntimeError(
@@ -299,56 +439,38 @@ def place_synthetic_buy(
         )
     qty      = instrument["qty"] * instrument["lot_size"]
     exchange = ce_info.get("exchange", "NFO")
+    ce_sym   = ce_info["kite_tradingsymbol"]
+    pe_sym   = pe_info["kite_tradingsymbol"]
 
-    # Leg 1: BUY CE
-    ce_order_id = _place_order(kite,
-        variety           = kite.VARIETY_REGULAR,
-        exchange          = exchange,
-        tradingsymbol     = ce_info["kite_tradingsymbol"],
-        transaction_type  = kite.TRANSACTION_TYPE_BUY,
-        quantity          = qty,
-        order_type        = kite.ORDER_TYPE_MARKET,
-        product           = instrument["product"],
-    )
-    logger.info(
-        "Synthetic BUY CE placed | %s | symbol=%s | qty=%d | order_id=%s",
-        instrument["name"], ce_info["kite_tradingsymbol"], qty, ce_order_id,
-    )
-    # Verify leg 1 filled before risking a partial fill on leg 2
-    _await_order_complete(
-        kite, ce_order_id,
-        f"{instrument['name']} Synthetic BUY CE {ce_info['kite_tradingsymbol']}",
+    # Leg 1: BUY CE — confirmed filled before risking a partial fill on leg 2
+    ce_order_id = _place_leg(
+        kite, f"{instrument['name']} Synthetic BUY CE {ce_sym}",
+        **_leg_params(kite, exchange=exchange, tradingsymbol=ce_sym,
+                      transaction_type=kite.TRANSACTION_TYPE_BUY,
+                      quantity=qty, product=instrument["product"]),
     )
 
     # Leg 2: SELL PE
     try:
-        pe_order_id = _place_order(kite,
-            variety           = kite.VARIETY_REGULAR,
-            exchange          = exchange,
-            tradingsymbol     = pe_info["kite_tradingsymbol"],
-            transaction_type  = kite.TRANSACTION_TYPE_SELL,
-            quantity          = qty,
-            order_type        = kite.ORDER_TYPE_MARKET,
-            product           = instrument["product"],
-        )
-        logger.info(
-            "Synthetic BUY PE (SELL) placed | %s | symbol=%s | qty=%d | order_id=%s",
-            instrument["name"], pe_info["kite_tradingsymbol"], qty, pe_order_id,
-        )
-        _await_order_complete(
-            kite, pe_order_id,
-            f"{instrument['name']} Synthetic SELL PE {pe_info['kite_tradingsymbol']}",
+        pe_order_id = _place_leg(
+            kite, f"{instrument['name']} Synthetic SELL PE {pe_sym}",
+            **_leg_params(kite, exchange=exchange, tradingsymbol=pe_sym,
+                          transaction_type=kite.TRANSACTION_TYPE_SELL,
+                          quantity=qty, product=instrument["product"]),
         )
     except Exception as exc:
+        unknown = isinstance(exc, OrderStatusUnknown)
         logger.critical(
-            "PARTIAL SYNTHETIC FILL — %s: CE leg placed (id=%s, symbol=%s) "
-            "but SELL PE FAILED (%s: %s). MANUAL INTERVENTION REQUIRED on Kite.",
-            instrument["name"], ce_order_id, ce_info["kite_tradingsymbol"],
-            pe_info["kite_tradingsymbol"], exc,
+            "PARTIAL SYNTHETIC FILL — %s: CE leg FILLED (id=%s, symbol=%s) "
+            "but SELL PE %s (%s: %s). MANUAL INTERVENTION REQUIRED on Kite.",
+            instrument["name"], ce_order_id, ce_sym,
+            "outcome UNKNOWN" if unknown else "FAILED", pe_sym, exc,
         )
-        raise RuntimeError(
+        raise SyntheticPartialFill(
             f"Synthetic BUY partial fill for {instrument['name']}: "
-            f"CE placed (id={ce_order_id}) but PE SELL failed: {exc}"
+            f"CE {ce_sym} filled (id={ce_order_id}) but PE SELL "
+            f"{'outcome unknown' if unknown else 'failed'}: {exc}",
+            filled_leg=ce_sym, failed_leg=pe_sym, outcome_unknown=unknown,
         ) from exc
 
     ce_ltp, pe_ltp = _fetch_option_ltps(
@@ -375,57 +497,38 @@ def place_synthetic_sell(
         )
     qty      = instrument["qty"] * instrument["lot_size"]
     exchange = pe_info.get("exchange", "NFO")
+    ce_sym   = ce_info["kite_tradingsymbol"]
+    pe_sym   = pe_info["kite_tradingsymbol"]
 
-    # Leg 1: BUY PE
-    pe_order_id = _place_order(kite,
-        variety           = kite.VARIETY_REGULAR,
-        exchange          = exchange,
-        tradingsymbol     = pe_info["kite_tradingsymbol"],
-        transaction_type  = kite.TRANSACTION_TYPE_BUY,
-        quantity          = qty,
-        order_type        = kite.ORDER_TYPE_MARKET,
-        product           = instrument["product"],
-    )
-    logger.info(
-        "Synthetic SELL PE (BUY) placed | %s | symbol=%s | qty=%d | order_id=%s",
-        instrument["name"], pe_info["kite_tradingsymbol"], qty, pe_order_id,
-    )
-    # Verify leg 1 filled before risking a partial fill on leg 2
-    _await_order_complete(
-        kite, pe_order_id,
-        f"{instrument['name']} Synthetic BUY PE {pe_info['kite_tradingsymbol']}",
+    # Leg 1: BUY PE — confirmed filled before risking a partial fill on leg 2
+    pe_order_id = _place_leg(
+        kite, f"{instrument['name']} Synthetic BUY PE {pe_sym}",
+        **_leg_params(kite, exchange=exchange, tradingsymbol=pe_sym,
+                      transaction_type=kite.TRANSACTION_TYPE_BUY,
+                      quantity=qty, product=instrument["product"]),
     )
 
     # Leg 2: SELL CE
-    ce_order_id = None
     try:
-        ce_order_id = _place_order(kite,
-            variety           = kite.VARIETY_REGULAR,
-            exchange          = exchange,
-            tradingsymbol     = ce_info["kite_tradingsymbol"],
-            transaction_type  = kite.TRANSACTION_TYPE_SELL,
-            quantity          = qty,
-            order_type        = kite.ORDER_TYPE_MARKET,
-            product           = instrument["product"],
-        )
-        logger.info(
-            "Synthetic SELL CE (SELL) placed | %s | symbol=%s | qty=%d | order_id=%s",
-            instrument["name"], ce_info["kite_tradingsymbol"], qty, ce_order_id,
-        )
-        _await_order_complete(
-            kite, ce_order_id,
-            f"{instrument['name']} Synthetic SELL CE {ce_info['kite_tradingsymbol']}",
+        ce_order_id = _place_leg(
+            kite, f"{instrument['name']} Synthetic SELL CE {ce_sym}",
+            **_leg_params(kite, exchange=exchange, tradingsymbol=ce_sym,
+                          transaction_type=kite.TRANSACTION_TYPE_SELL,
+                          quantity=qty, product=instrument["product"]),
         )
     except Exception as exc:
+        unknown = isinstance(exc, OrderStatusUnknown)
         logger.critical(
-            "PARTIAL SYNTHETIC FILL — %s: PE leg placed (id=%s, symbol=%s) "
-            "but SELL CE FAILED (%s: %s). MANUAL INTERVENTION REQUIRED on Kite.",
-            instrument["name"], pe_order_id, pe_info["kite_tradingsymbol"],
-            ce_info["kite_tradingsymbol"], exc,
+            "PARTIAL SYNTHETIC FILL — %s: PE leg FILLED (id=%s, symbol=%s) "
+            "but SELL CE %s (%s: %s). MANUAL INTERVENTION REQUIRED on Kite.",
+            instrument["name"], pe_order_id, pe_sym,
+            "outcome UNKNOWN" if unknown else "FAILED", ce_sym, exc,
         )
-        raise RuntimeError(
+        raise SyntheticPartialFill(
             f"Synthetic SELL partial fill for {instrument['name']}: "
-            f"PE placed (id={pe_order_id}) but CE SELL failed: {exc}"
+            f"PE {pe_sym} filled (id={pe_order_id}) but CE SELL "
+            f"{'outcome unknown' if unknown else 'failed'}: {exc}",
+            filled_leg=pe_sym, failed_leg=ce_sym, outcome_unknown=unknown,
         ) from exc
 
     ce_ltp, pe_ltp = _fetch_option_ltps(
@@ -445,7 +548,10 @@ def close_synthetic_long(
     Close a long synthetic future: SELL CE + BUY PE.
 
     Returns (ce_order_id, pe_order_id, exit_ce_ltp, exit_pe_ltp).
-    Same partial-fill safety: if BUY PE fails after SELL CE, raises RuntimeError.
+    If BUY PE fails after SELL CE it is retried once (only on a definitive
+    no-fill); otherwise SyntheticPartialFill is raised so the caller HALTS the
+    instrument — re-running the whole exit would sell the CE a second time
+    (that is exactly what happened to NIFTY_H on 2026-08-27).
     """
     if kite is None:
         raise RuntimeError(
@@ -453,54 +559,35 @@ def close_synthetic_long(
         )
     qty = instrument["qty"] * instrument["lot_size"]
 
-    # Leg 1: SELL CE
-    ce_order_id = _place_order(kite,
-        variety           = kite.VARIETY_REGULAR,
-        exchange          = exchange,
-        tradingsymbol     = ce_symbol,
-        transaction_type  = kite.TRANSACTION_TYPE_SELL,
-        quantity          = qty,
-        order_type        = kite.ORDER_TYPE_MARKET,
-        product           = instrument["product"],
-    )
-    logger.info(
-        "Synthetic EXIT LONG SELL CE | %s | symbol=%s | order_id=%s",
-        instrument["name"], ce_symbol, ce_order_id,
-    )
-    # Verify leg 1 filled before risking a partial fill on leg 2
-    _await_order_complete(
-        kite, ce_order_id,
-        f"{instrument['name']} Synthetic EXIT_LONG SELL CE {ce_symbol}",
+    # Leg 1: SELL CE — confirmed filled before risking a partial fill on leg 2
+    ce_order_id = _place_leg(
+        kite, f"{instrument['name']} Synthetic EXIT_LONG SELL CE {ce_symbol}",
+        **_leg_params(kite, exchange=exchange, tradingsymbol=ce_symbol,
+                      transaction_type=kite.TRANSACTION_TYPE_SELL,
+                      quantity=qty, product=instrument["product"]),
     )
 
     # Leg 2: BUY PE
     try:
-        pe_order_id = _place_order(kite,
-            variety           = kite.VARIETY_REGULAR,
-            exchange          = exchange,
-            tradingsymbol     = pe_symbol,
-            transaction_type  = kite.TRANSACTION_TYPE_BUY,
-            quantity          = qty,
-            order_type        = kite.ORDER_TYPE_MARKET,
-            product           = instrument["product"],
-        )
-        logger.info(
-            "Synthetic EXIT LONG BUY PE | %s | symbol=%s | order_id=%s",
-            instrument["name"], pe_symbol, pe_order_id,
-        )
-        _await_order_complete(
-            kite, pe_order_id,
-            f"{instrument['name']} Synthetic EXIT_LONG BUY PE {pe_symbol}",
+        pe_order_id = _place_leg(
+            kite, f"{instrument['name']} Synthetic EXIT_LONG BUY PE {pe_symbol}",
+            **_leg_params(kite, exchange=exchange, tradingsymbol=pe_symbol,
+                          transaction_type=kite.TRANSACTION_TYPE_BUY,
+                          quantity=qty, product=instrument["product"]),
         )
     except Exception as exc:
+        unknown = isinstance(exc, OrderStatusUnknown)
         logger.critical(
-            "PARTIAL SYNTHETIC EXIT — %s: SELL CE placed (id=%s, symbol=%s) "
-            "but BUY PE FAILED (%s: %s). MANUAL INTERVENTION REQUIRED on Kite.",
-            instrument["name"], ce_order_id, ce_symbol, pe_symbol, exc,
+            "PARTIAL SYNTHETIC EXIT — %s: SELL CE FILLED (id=%s, symbol=%s) "
+            "but BUY PE %s (%s: %s). MANUAL INTERVENTION REQUIRED on Kite.",
+            instrument["name"], ce_order_id, ce_symbol,
+            "outcome UNKNOWN" if unknown else "FAILED", pe_symbol, exc,
         )
-        raise RuntimeError(
+        raise SyntheticPartialFill(
             f"Synthetic EXIT LONG partial fail for {instrument['name']}: "
-            f"CE closed (id={ce_order_id}) but PE BUY failed: {exc}"
+            f"CE {ce_symbol} closed (id={ce_order_id}) but PE BUY "
+            f"{'outcome unknown' if unknown else 'failed'}: {exc}",
+            filled_leg=ce_symbol, failed_leg=pe_symbol, outcome_unknown=unknown,
         ) from exc
 
     exit_ce_ltp, exit_pe_ltp = _fetch_option_ltps(kite, ce_symbol, pe_symbol, exchange)
@@ -526,54 +613,35 @@ def close_synthetic_short(
         )
     qty = instrument["qty"] * instrument["lot_size"]
 
-    # Leg 1: SELL PE
-    pe_order_id = _place_order(kite,
-        variety           = kite.VARIETY_REGULAR,
-        exchange          = exchange,
-        tradingsymbol     = pe_symbol,
-        transaction_type  = kite.TRANSACTION_TYPE_SELL,
-        quantity          = qty,
-        order_type        = kite.ORDER_TYPE_MARKET,
-        product           = instrument["product"],
-    )
-    logger.info(
-        "Synthetic EXIT SHORT SELL PE | %s | symbol=%s | order_id=%s",
-        instrument["name"], pe_symbol, pe_order_id,
-    )
-    # Verify leg 1 filled before risking a partial fill on leg 2
-    _await_order_complete(
-        kite, pe_order_id,
-        f"{instrument['name']} Synthetic EXIT_SHORT SELL PE {pe_symbol}",
+    # Leg 1: SELL PE — confirmed filled before risking a partial fill on leg 2
+    pe_order_id = _place_leg(
+        kite, f"{instrument['name']} Synthetic EXIT_SHORT SELL PE {pe_symbol}",
+        **_leg_params(kite, exchange=exchange, tradingsymbol=pe_symbol,
+                      transaction_type=kite.TRANSACTION_TYPE_SELL,
+                      quantity=qty, product=instrument["product"]),
     )
 
     # Leg 2: BUY CE
     try:
-        ce_order_id = _place_order(kite,
-            variety           = kite.VARIETY_REGULAR,
-            exchange          = exchange,
-            tradingsymbol     = ce_symbol,
-            transaction_type  = kite.TRANSACTION_TYPE_BUY,
-            quantity          = qty,
-            order_type        = kite.ORDER_TYPE_MARKET,
-            product           = instrument["product"],
-        )
-        logger.info(
-            "Synthetic EXIT SHORT BUY CE | %s | symbol=%s | order_id=%s",
-            instrument["name"], ce_symbol, ce_order_id,
-        )
-        _await_order_complete(
-            kite, ce_order_id,
-            f"{instrument['name']} Synthetic EXIT_SHORT BUY CE {ce_symbol}",
+        ce_order_id = _place_leg(
+            kite, f"{instrument['name']} Synthetic EXIT_SHORT BUY CE {ce_symbol}",
+            **_leg_params(kite, exchange=exchange, tradingsymbol=ce_symbol,
+                          transaction_type=kite.TRANSACTION_TYPE_BUY,
+                          quantity=qty, product=instrument["product"]),
         )
     except Exception as exc:
+        unknown = isinstance(exc, OrderStatusUnknown)
         logger.critical(
-            "PARTIAL SYNTHETIC EXIT — %s: SELL PE placed (id=%s, symbol=%s) "
-            "but BUY CE FAILED (%s: %s). MANUAL INTERVENTION REQUIRED on Kite.",
-            instrument["name"], pe_order_id, pe_symbol, ce_symbol, exc,
+            "PARTIAL SYNTHETIC EXIT — %s: SELL PE FILLED (id=%s, symbol=%s) "
+            "but BUY CE %s (%s: %s). MANUAL INTERVENTION REQUIRED on Kite.",
+            instrument["name"], pe_order_id, pe_symbol,
+            "outcome UNKNOWN" if unknown else "FAILED", ce_symbol, exc,
         )
-        raise RuntimeError(
+        raise SyntheticPartialFill(
             f"Synthetic EXIT SHORT partial fail for {instrument['name']}: "
-            f"PE closed (id={pe_order_id}) but CE BUY failed: {exc}"
+            f"PE {pe_symbol} closed (id={pe_order_id}) but CE BUY "
+            f"{'outcome unknown' if unknown else 'failed'}: {exc}",
+            filled_leg=pe_symbol, failed_leg=ce_symbol, outcome_unknown=unknown,
         ) from exc
 
     exit_ce_ltp, exit_pe_ltp = _fetch_option_ltps(kite, ce_symbol, pe_symbol, exchange)
@@ -598,23 +666,14 @@ def place_short_ce(
     qty      = instrument["qty"] * instrument["lot_size"]
     exchange = ce_info.get("exchange", "NFO")
 
-    order_id = _place_order(kite,
-        variety           = kite.VARIETY_REGULAR,
-        exchange          = exchange,
-        tradingsymbol     = ce_info["kite_tradingsymbol"],
-        transaction_type  = kite.TRANSACTION_TYPE_SELL,
-        quantity          = qty,
-        order_type        = kite.ORDER_TYPE_MARKET,
-        product           = instrument["product"],
-    )
-    logger.info(
-        "Short CE SELL placed | %s | symbol=%s | strike=%s | qty=%d | order_id=%s",
-        instrument["name"], ce_info["kite_tradingsymbol"],
-        ce_info.get("strike", "?"), qty, order_id,
-    )
-    _await_order_complete(
-        kite, order_id,
-        f"{instrument['name']} Short CE SELL {ce_info['kite_tradingsymbol']}",
+    order_id = _place_leg(
+        kite,
+        f"{instrument['name']} Short CE SELL {ce_info['kite_tradingsymbol']} "
+        f"(strike={ce_info.get('strike', '?')})",
+        **_leg_params(kite, exchange=exchange,
+                      tradingsymbol=ce_info["kite_tradingsymbol"],
+                      transaction_type=kite.TRANSACTION_TYPE_SELL,
+                      quantity=qty, product=instrument["product"]),
     )
 
     # Fetch entry LTP immediately after order placement
@@ -647,22 +706,11 @@ def close_short_ce(
         )
     qty = instrument["qty"] * instrument["lot_size"]
 
-    order_id = _place_order(kite,
-        variety           = kite.VARIETY_REGULAR,
-        exchange          = exchange,
-        tradingsymbol     = ce_symbol,
-        transaction_type  = kite.TRANSACTION_TYPE_BUY,
-        quantity          = qty,
-        order_type        = kite.ORDER_TYPE_MARKET,
-        product           = instrument["product"],
-    )
-    logger.info(
-        "Short CE BUY-back placed | %s | symbol=%s | qty=%d | order_id=%s",
-        instrument["name"], ce_symbol, qty, order_id,
-    )
-    _await_order_complete(
-        kite, order_id,
-        f"{instrument['name']} Short CE BUY-back {ce_symbol}",
+    order_id = _place_leg(
+        kite, f"{instrument['name']} Short CE BUY-back {ce_symbol}",
+        **_leg_params(kite, exchange=exchange, tradingsymbol=ce_symbol,
+                      transaction_type=kite.TRANSACTION_TYPE_BUY,
+                      quantity=qty, product=instrument["product"]),
     )
 
     ce_key = f"{exchange}:{ce_symbol}"
@@ -678,9 +726,19 @@ def close_short_ce(
 
 def square_off_all(kite: KiteConnect, resolved_instruments: list, state: dict):
     """Emergency / EOD square-off of every tracked open position."""
+    import strategy_config
     from state import get_position, refresh_position, set_position, instrument_lock
     for instrument in resolved_instruments:
         name = instrument["name"]
+        # A halted instrument's saved state may not match the broker (that is
+        # why it was halted) — firing a close off it could open a naked
+        # position instead. It must be reconciled and closed manually on Kite.
+        if strategy_config.get_halted(name):
+            logger.critical(
+                "square_off_all: %s is HALTED (state may not match broker) — "
+                "skipped; verify and close it manually on Kite", name,
+            )
+            continue
         # Hold the instrument lock across check+close+save so this can't race
         # a concurrent strategy tick (or the 14:45 expiry square-off job)
         # deciding to act on the same instrument at the same time.
@@ -690,14 +748,29 @@ def square_off_all(kite: KiteConnect, resolved_instruments: list, state: dict):
             if pos == 0:
                 continue
             saved = state.get(name, {})
-            if pos > 0:
-                close_long(kite, instrument)
-            elif saved.get("is_short_ce"):
-                ce_sym = saved.get("ce_tradingsymbol", "")
-                if ce_sym:
-                    close_short_ce(kite, instrument, ce_sym)
+            # Contain failures per instrument so one bad close doesn't abort
+            # the square-off of everything after it in the list.
+            try:
+                if pos > 0:
+                    close_long(kite, instrument)
+                elif saved.get("is_short_ce"):
+                    ce_sym = saved.get("ce_tradingsymbol", "")
+                    if ce_sym:
+                        close_short_ce(kite, instrument, ce_sym)
+                    else:
+                        logger.warning("square_off_all: %s is_short_ce but no ce_tradingsymbol in state", name)
+                        continue
                 else:
-                    logger.warning("square_off_all: %s is_short_ce but no ce_tradingsymbol in state", name)
-            else:
-                close_short(kite, instrument)
-            set_position(state, name, 0)
+                    close_short(kite, instrument)
+                set_position(state, name, 0)
+            except OrderStatusUnknown as exc:
+                logger.critical(
+                    "square_off_all: %s close outcome UNKNOWN (%s) — instrument "
+                    "halted, reconcile on Kite manually", name, exc,
+                )
+                strategy_config.set_halted(name, f"square_off_all close: {exc}")
+            except Exception as exc:
+                logger.error(
+                    "square_off_all: closing %s failed (%s) — continuing with "
+                    "remaining instruments", name, exc, exc_info=True,
+                )

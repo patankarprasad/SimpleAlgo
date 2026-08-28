@@ -9,6 +9,7 @@ Default: all instruments enabled. Missing key = enabled.
 """
 import json
 import threading
+from datetime import datetime
 from pathlib import Path
 
 _FILE = Path("strategy_config.json")
@@ -91,3 +92,43 @@ def get_all_booked_manually(names: list[str]) -> dict[str, dict | None]:
     with _lock:
         cfg = _load()
         return {name: cfg.get(f"_bm_{name}") for name in names}
+
+
+# ── Halted state ──────────────────────────────────────────────────────────────
+# Set automatically when an order's outcome could not be confirmed or a
+# synthetic order partially filled — i.e. whenever the algo's saved position
+# may no longer match the broker's. While halted, the strategy loop places NO
+# orders for the instrument (and the expiry square-off / square-off-all skip
+# it). Cleared from the dashboard once the operator has verified and, if
+# needed, fixed the position on Kite.
+
+def get_halted(name: str) -> dict | None:
+    """Return {reason, time} if this instrument is halted, else None."""
+    with _lock:
+        return _load().get(f"_halt_{name}")
+
+
+def set_halted(name: str, reason: str) -> None:
+    """Halt all automated trading for one instrument until manually resumed."""
+    with _lock:
+        cfg = _load()
+        cfg[f"_halt_{name}"] = {
+            "reason": reason[:400],
+            "time":   datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        }
+        _save(cfg)
+
+
+def clear_halted(name: str) -> None:
+    """Resume automated trading for a halted instrument (operator action)."""
+    with _lock:
+        cfg = _load()
+        cfg.pop(f"_halt_{name}", None)
+        _save(cfg)
+
+
+def get_all_halted(names: list[str]) -> dict[str, dict | None]:
+    """Return {name: halt_state_or_None} for the given instrument names."""
+    with _lock:
+        cfg = _load()
+        return {name: cfg.get(f"_halt_{name}") for name in names}

@@ -6,6 +6,8 @@ import os
 import sys
 from dotenv import load_dotenv
 
+import instrument_config as _icfg
+
 if getattr(sys, "frozen", False):
     BASE_DIR = os.path.dirname(sys.executable)
 else:
@@ -94,7 +96,7 @@ TRADING_DAYS_ONLY   = os.getenv("TRADING_DAYS_ONLY", "true").strip().lower() == 
 # NFO (NIFTY / BANKNIFTY) : 09:15 – 15:30
 # MCX (GOLDM / CRUDEOIL)  : 09:00 – 23:30  (MCX evening session ends at 23:30)
 
-INSTRUMENTS = [
+_DEFAULT_INSTRUMENTS = [
     {
         "name":          "GOLDM",
         "exchange":      "MCX",
@@ -183,7 +185,7 @@ INSTRUMENTS = [
     },
 ]
 
-HOURLY_INSTRUMENTS = [
+_DEFAULT_HOURLY_INSTRUMENTS = [
     {
         "name":          "GOLDM_H",
         "underlying":    "GOLDM",       # inherits resolved tokens from base instrument
@@ -253,29 +255,89 @@ HOURLY_INSTRUMENTS = [
 ]
 
 # ── Stock Futures ──────────────────────────────────────────────────────────────
-# Comma-separated list of NSE stock names whose nearest futures contract should
-# be traded with the same supertrend + MA strategy.
-# Example: STOCK_FUTURES=RELIANCE,HDFCBANK,TCS
-# Each stock is treated as a plain futures instrument (no SYNTHETIC mode).
-# STOCK_FUTURES_QTY    – number of lots per stock (default 1)
-# STOCK_FUTURES_PRODUCT – NRML (positional/overnight) or MIS (intraday)
-_raw_stocks = os.getenv("STOCK_FUTURES", "").strip()
-STOCK_FUTURES_NAMES   = [s.strip().upper() for s in _raw_stocks.split(",") if s.strip()]
-STOCK_FUTURES_QTY     = int(os.getenv("STOCK_FUTURES_QTY", "1"))
-STOCK_FUTURES_PRODUCT = os.getenv("STOCK_FUTURES_PRODUCT", "NRML")
+# NSE stock names whose nearest futures contract is traded with the same
+# supertrend + MA strategy.  Each stock is a plain futures instrument (no
+# SYNTHETIC mode).
+#
+# The list lives in instrument_config.json and is edited from the dashboard
+# Settings page.  STOCK_FUTURES / STOCK_FUTURES_QTY / STOCK_FUTURES_PRODUCT in
+# .env are only used to SEED that file the first time it is created, so an
+# existing deployment keeps its stocks after the upgrade; after that the
+# dashboard is the source of truth and the .env values are ignored.
+def _env_seed(key: str, default: str) -> str:
+    """
+    Read a seed value, tolerating a trailing inline comment.
 
-STOCK_INSTRUMENTS = [
-    {
-        "name":        name,
-        "exchange":    "NFO",
-        "qty":         STOCK_FUTURES_QTY,
-        "product":     STOCK_FUTURES_PRODUCT,
-        "trade_start": "09:15",
-        "trade_end":   "15:30",
-        "timeframe":   "FIFTEEN_MINUTE",
-    }
-    for name in STOCK_FUTURES_NAMES
-]
+    systemd's EnvironmentFile= keeps "# ..." as part of the value (python-dotenv
+    strips it), and load_dotenv does not override what systemd already set. That
+    difference is harmless for a value re-read every start, but these three seed
+    a file ONCE — a polluted value would be frozen in permanently.
+    """
+    return os.getenv(key, default).split("#", 1)[0].strip() or default
+
+
+_raw_stocks           = _env_seed("STOCK_FUTURES", "")
+_ENV_STOCK_NAMES      = [s.strip().upper() for s in _raw_stocks.split(",") if s.strip()]
+_ENV_STOCK_QTY        = int(_env_seed("STOCK_FUTURES_QTY", "1"))
+_ENV_STOCK_PRODUCT    = _env_seed("STOCK_FUTURES_PRODUCT", "NRML")
+
+_icfg.seed_stock_futures(_ENV_STOCK_NAMES, _ENV_STOCK_QTY, _ENV_STOCK_PRODUCT)
+
+
+# ── Dashboard-editable overlay ─────────────────────────────────────────────────
+# INSTRUMENTS, HOURLY_INSTRUMENTS and STOCK_INSTRUMENTS are rebuilt from the
+# _DEFAULT_* lists above plus the runtime overrides in instrument_config.json.
+# Read them as config.INSTRUMENTS (never `from config import INSTRUMENTS`) so a
+# reload is picked up without a restart.
+
+INSTRUMENTS:           list[dict] = []
+HOURLY_INSTRUMENTS:    list[dict] = []
+STOCK_INSTRUMENTS:     list[dict] = []
+STOCK_FUTURES_NAMES:   list[str]  = []
+STOCK_FUTURES_QTY:     int        = _ENV_STOCK_QTY
+STOCK_FUTURES_PRODUCT: str        = _ENV_STOCK_PRODUCT
+
+
+def _with_lots(inst_def: dict, lots: dict[str, int]) -> dict:
+    """Return a copy of inst_def with qty replaced by its dashboard override."""
+    override = lots.get(inst_def["name"].upper())
+    return inst_def if override is None else {**inst_def, "qty": override}
+
+
+def reload_instrument_config() -> None:
+    """
+    Re-read instrument_config.json and rebuild the three instrument lists.
+
+    Called once at import and again whenever the dashboard saves a change.
+    This only rebuilds the *definitions* — main.reload_instruments() applies
+    them to the live resolved instruments.
+    """
+    global INSTRUMENTS, HOURLY_INSTRUMENTS, STOCK_INSTRUMENTS
+    global STOCK_FUTURES_NAMES, STOCK_FUTURES_QTY, STOCK_FUTURES_PRODUCT
+
+    lots = _icfg.get_all_lots()
+    STOCK_FUTURES_QTY, STOCK_FUTURES_PRODUCT = _icfg.get_stock_defaults(
+        _ENV_STOCK_QTY, _ENV_STOCK_PRODUCT,
+    )
+    STOCK_FUTURES_NAMES = _icfg.get_stock_futures(_ENV_STOCK_NAMES)
+
+    INSTRUMENTS        = [_with_lots(i, lots) for i in _DEFAULT_INSTRUMENTS]
+    HOURLY_INSTRUMENTS = [_with_lots(i, lots) for i in _DEFAULT_HOURLY_INSTRUMENTS]
+    STOCK_INSTRUMENTS  = [
+        {
+            "name":        name,
+            "exchange":    "NFO",
+            "qty":         lots.get(name, STOCK_FUTURES_QTY),
+            "product":     STOCK_FUTURES_PRODUCT,
+            "trade_start": "09:15",
+            "trade_end":   "15:30",
+            "timeframe":   "FIFTEEN_MINUTE",
+        }
+        for name in STOCK_FUTURES_NAMES
+    ]
+
+
+reload_instrument_config()
 
 # ── Session token cache paths ──────────────────────────────────────────────────
 LOGS_DIR           = os.path.join(BASE_DIR, "logs")
@@ -285,3 +347,12 @@ ANGEL_TOKEN_FILE   = os.path.join(BASE_DIR, "angel_token.json")
 STATE_FILE         = os.path.join(BASE_DIR, "positions_state.json")
 PAPER_STATE_FILE   = os.path.join(BASE_DIR, "paper_positions_state.json")  # persisted paper trade positions
 CONTRACT_PIN_FILE  = os.path.join(BASE_DIR, "contract_pin.json")            # manual rollover overrides
+INSTRUMENT_CONFIG_FILE = str(_icfg.CONFIG_FILE)   # dashboard-editable lots + stock list
+
+# ── Service restart (dashboard "Restart Service" button) ───────────────────────
+# On the Linux VPS the dashboard restarts the app through systemd. This needs a
+# passwordless sudo rule — see DEPLOYMENT.txt section 9a.
+# Set RESTART_COMMAND to override entirely (e.g. on Windows, or for a
+# non-systemd supervisor).
+SERVICE_NAME    = os.getenv("SERVICE_NAME", "simplealgo")
+RESTART_COMMAND = os.getenv("RESTART_COMMAND", "").strip()

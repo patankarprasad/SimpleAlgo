@@ -397,3 +397,50 @@ def notify_synthetic_partial_fill(
         f"manually on Kite before the next signal fires."
     )
     logger.critical("Telegram: synthetic partial fill alert sent for %s", name)
+
+
+def notify_instrument_halted(name: str, reason: str) -> None:
+    """
+    Critical alert: automated trading for one instrument has been halted
+    because the algo can no longer trust that its saved position matches the
+    broker (unconfirmed order outcome, or a partial synthetic fill).
+    The algo will NOT place any further orders for it until the operator
+    verifies the position on Kite and presses Resume on the dashboard.
+    """
+    time_str = datetime.now(IST).strftime("%H:%M:%S IST")
+    _send(
+        f"🛑 <b>TRADING HALTED — {name}</b>\n\n"
+        f"Time:   {time_str}\n"
+        f"Reason: {reason}\n\n"
+        f"⛔ The algo will place NO further orders for {name} "
+        f"(strategy ticks, expiry square-off and Square Off All will all skip it).\n\n"
+        f"<b>ACTION REQUIRED:</b>\n"
+        f"1. Check the actual position for {name} on Kite.\n"
+        f"2. Fix any mismatch manually (close/open legs as needed).\n"
+        f"3. Press <b>Resume</b> on the {name} dashboard card."
+    )
+    logger.critical("Telegram: instrument halted alert sent for %s", name)
+
+
+def notify_service_restart(command: str) -> None:
+    """Operator pressed Restart Service on the dashboard."""
+    time_str = datetime.now(IST).strftime("%Y-%m-%d %H:%M:%S IST")
+    _send(
+        f"🔁 <b>SERVICE RESTART</b>\n\n"
+        f"Time:    {time_str}\n"
+        f"Command: <code>{command}</code>\n\n"
+        f"Requested from the dashboard. Open positions are kept in "
+        f"positions_state.json and reloaded on startup."
+    )
+    logger.warning("Telegram: service restart notification sent (%s)", command)
+
+
+def notify_instrument_config_changed(summary: str) -> None:
+    """Instrument lots / stock futures list edited from the dashboard."""
+    time_str = datetime.now(IST).strftime("%H:%M:%S IST")
+    _send(
+        f"⚙️ <b>INSTRUMENT CONFIG CHANGED</b>\n\n"
+        f"Time: {time_str}\n"
+        f"{summary}"
+    )
+    logger.info("Telegram: instrument config change sent (%s)", summary)

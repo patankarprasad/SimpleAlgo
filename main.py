@@ -20,6 +20,8 @@ import concurrent.futures
 import logging
 import os
 import sys
+import threading
+import time
 from datetime import datetime, timedelta
 
 import pytz
@@ -42,6 +44,7 @@ from order_manager import (
     place_synthetic_buy, place_synthetic_sell,
     close_synthetic_long, close_synthetic_short,
     place_short_ce, close_short_ce,
+    OrderStatusUnknown, SyntheticPartialFill,
 )
 from state import load_state, set_position, get_position, refresh_position, instrument_lock
 
@@ -73,6 +76,30 @@ RESOLVED_INSTRUMENTS: list[dict] = []
 RESOLVED_HOURLY_INSTRUMENTS: list[dict] = []
 RESOLVED_STOCK_INSTRUMENTS: list[dict] = []
 DRY_RUN: bool = False
+
+# Serializes writers of the RESOLVED_* lists (webapp rollover pin, tender-period
+# auto-pin, the daily refresh job). Readers stay lock-free: element replacement
+# is atomic under the GIL, so an iterating strategy tick sees either the old or
+# the new instrument dict, both of which are internally consistent.
+_RESOLVE_LOCK = threading.Lock()
+
+
+def _halt_instrument(name: str, reason: str) -> None:
+    """
+    Stop all automated trading for one instrument because its saved position
+    can no longer be trusted to match the broker (an order's outcome is
+    unknown, or a synthetic order partially filled). Retrying blindly in
+    either direction doubles positions or opens naked ones — a human must
+    reconcile against Kite and press Resume on the dashboard.
+    """
+    strategy_config.set_halted(name, reason)
+    logger.critical(
+        "%s: TRADING HALTED — %s. No further orders will be placed for this "
+        "instrument. Verify the position on Kite, fix it manually if needed, "
+        "then press Resume on the dashboard.",
+        name, reason,
+    )
+    notifier.notify_instrument_halted(name, reason)
 
 
 # ── Initialisation ─────────────────────────────────────────────────────────────
@@ -200,43 +227,135 @@ def re_resolve_instrument(name: str) -> bool:
         "spot_index_name",
     )
 
-    for bucket, label in (
-        (RESOLVED_INSTRUMENTS,       "RESOLVED_INSTRUMENTS"),
-        (RESOLVED_STOCK_INSTRUMENTS, "RESOLVED_STOCK_INSTRUMENTS"),
-    ):
-        idx = next((i for i, inst in enumerate(bucket) if inst["name"] == name), None)
-        if idx is None:
-            continue
-        inst_def = {k: v for k, v in bucket[idx].items() if k in _STRIP_KEYS}
-        try:
-            resolved   = scrip_master.resolve_instrument(inst_def)
-            bucket[idx] = resolved
-            # Rebuild any hourly variants that inherit from this base instrument.
-            for hi, h_inst in enumerate(RESOLVED_HOURLY_INSTRUMENTS):
-                if h_inst.get("underlying") == name:
-                    h_keys = {
-                        k: h_inst[k] for k in h_inst
-                        if k in _STRIP_KEYS or k in ("underlying", "contract_size", "long_only")
-                    }
-                    RESOLVED_HOURLY_INSTRUMENTS[hi] = {**resolved, **h_keys}
-                    logger.info(
-                        "re_resolve_instrument: hourly variant %s updated from base %s",
-                        h_inst["name"], name,
-                    )
-            web_state.set_resolved_instruments(
-                RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS + RESOLVED_STOCK_INSTRUMENTS
-            )
-            logger.info(
-                "re_resolve_instrument: %s → %s (expiry %s) [%s]",
-                name, resolved["kite_tradingsymbol"], resolved.get("expiry"), label,
-            )
-            return True
-        except Exception as exc:
-            logger.error("re_resolve_instrument: failed to re-resolve %s: %s", name, exc)
-            return False
+    with _RESOLVE_LOCK:
+        for bucket, label in (
+            (RESOLVED_INSTRUMENTS,       "RESOLVED_INSTRUMENTS"),
+            (RESOLVED_STOCK_INSTRUMENTS, "RESOLVED_STOCK_INSTRUMENTS"),
+        ):
+            idx = next((i for i, inst in enumerate(bucket) if inst["name"] == name), None)
+            if idx is None:
+                continue
+            inst_def = {k: v for k, v in bucket[idx].items() if k in _STRIP_KEYS}
+            try:
+                resolved = scrip_master.resolve_instrument(inst_def)
+                # Preserve the spot-index enrichment added by initialise() —
+                # resolve_instrument() knows nothing about it, and the spot
+                # index token never changes with contract rollovers.
+                for k in ("spot_angel_token", "spot_angel_exchange", "spot_angel_symbol"):
+                    if k in bucket[idx]:
+                        resolved[k] = bucket[idx][k]
+                bucket[idx] = resolved
+                # Rebuild any hourly variants that inherit from this base instrument.
+                for hi, h_inst in enumerate(RESOLVED_HOURLY_INSTRUMENTS):
+                    if h_inst.get("underlying") == name:
+                        h_keys = {
+                            k: h_inst[k] for k in h_inst
+                            if k in _STRIP_KEYS or k in ("underlying", "contract_size", "long_only")
+                        }
+                        RESOLVED_HOURLY_INSTRUMENTS[hi] = {**resolved, **h_keys}
+                        logger.info(
+                            "re_resolve_instrument: hourly variant %s updated from base %s",
+                            h_inst["name"], name,
+                        )
+                web_state.set_resolved_instruments(
+                    RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS + RESOLVED_STOCK_INSTRUMENTS
+                )
+                logger.info(
+                    "re_resolve_instrument: %s → %s (expiry %s) [%s]",
+                    name, resolved["kite_tradingsymbol"], resolved.get("expiry"), label,
+                )
+                return True
+            except Exception as exc:
+                logger.error("re_resolve_instrument: failed to re-resolve %s: %s", name, exc)
+                return False
 
     logger.warning("re_resolve_instrument: %s not found in any instrument list", name)
     return False
+
+
+def reload_instruments() -> dict:
+    """
+    Re-read the dashboard-editable instrument config (lots + stock futures
+    list) and apply it to the live resolved instruments — no restart needed.
+
+    Returns a report dict:
+        {"lots": [(name, old, new)], "added": [name], "removed": [name],
+         "failed": [(name, error)]}
+
+    Concurrency: the three RESOLVED_* globals are REBOUND to freshly built
+    lists rather than mutated, so a strategy tick already iterating one of them
+    keeps walking a complete, internally consistent snapshot.
+    """
+    global RESOLVED_INSTRUMENTS, RESOLVED_HOURLY_INSTRUMENTS, RESOLVED_STOCK_INSTRUMENTS
+
+    config.reload_instrument_config()
+    report: dict = {"lots": [], "added": [], "removed": [], "failed": []}
+
+    with _RESOLVE_LOCK:
+        # ── config changes on already-resolved instruments ────────────────────
+        # The definition dict is laid back over the resolved one. Contract data
+        # (tokens, symbol, expiry, lot_size) and the spot-index enrichment are
+        # not definition keys, so they survive untouched.
+        wanted_defs = {
+            i["name"]: i
+            for i in config.INSTRUMENTS + config.HOURLY_INSTRUMENTS + config.STOCK_INSTRUMENTS
+        }
+
+        def _apply_defs(bucket: list[dict]) -> list[dict]:
+            out = []
+            for inst in bucket:
+                inst_def = wanted_defs.get(inst["name"])
+                if inst_def is not None:
+                    if inst_def["qty"] != inst.get("qty"):
+                        report["lots"].append((inst["name"], inst.get("qty"), inst_def["qty"]))
+                    if any(inst.get(k) != v for k, v in inst_def.items()):
+                        inst = {**inst, **inst_def}
+                out.append(inst)
+            return out
+
+        new_main   = _apply_defs(RESOLVED_INSTRUMENTS)
+        new_hourly = _apply_defs(RESOLVED_HOURLY_INSTRUMENTS)
+
+        # ── stock futures added / removed ─────────────────────────────────────
+        wanted_stocks = {i["name"]: i for i in config.STOCK_INSTRUMENTS}
+        new_stocks    = [
+            i for i in _apply_defs(RESOLVED_STOCK_INSTRUMENTS) if i["name"] in wanted_stocks
+        ]
+        resolved_names = {i["name"] for i in RESOLVED_STOCK_INSTRUMENTS}
+
+        for name in resolved_names - set(wanted_stocks):
+            report["removed"].append(name)
+
+        for name, inst_def in wanted_stocks.items():
+            if name in resolved_names:
+                continue
+            try:
+                resolved = scrip_master.resolve_instrument(inst_def)
+                new_stocks.append(resolved)
+                report["added"].append(name)
+                logger.info(
+                    "reload_instruments: added stock future %-12s | kite=%-22s | "
+                    "expiry=%s | lot=%d",
+                    name, resolved["kite_tradingsymbol"], resolved.get("expiry"),
+                    resolved["lot_size"],
+                )
+            except Exception as exc:
+                report["failed"].append((name, str(exc)))
+                logger.error("reload_instruments: could not resolve %s: %s", name, exc)
+
+        RESOLVED_INSTRUMENTS        = new_main
+        RESOLVED_HOURLY_INSTRUMENTS = new_hourly
+        RESOLVED_STOCK_INSTRUMENTS  = new_stocks
+        web_state.set_resolved_instruments(
+            RESOLVED_INSTRUMENTS + RESOLVED_HOURLY_INSTRUMENTS + RESOLVED_STOCK_INSTRUMENTS
+        )
+
+    for name, old, new_ in report["lots"]:
+        logger.info("reload_instruments: %s lots %s → %s", name, old, new_)
+    for name in report["removed"]:
+        logger.info("reload_instruments: removed stock future %s", name)
+
+    return report
 
 
 # ── Contract rollover check ────────────────────────────────────────────────────
@@ -269,6 +388,48 @@ def _check_rollover():
                 name, old_sym, new_sym,
             )
             notifier.notify_rollover_warning(name, old_sym, new_sym, pos)
+
+
+def _daily_refresh_job():
+    """
+    08:40 IST — re-download the scrip masters and re-resolve every contract.
+
+    A long-running process otherwise keeps trading the contract universe from
+    its start day: option strikes listed after startup are invisible to
+    get_atm_options, and after a futures expiry the dead instrument token is
+    retried every tick all day (CRUDEOIL was blind for ~4 trading hours on
+    both 2026-07-22 and 2026-08-20 until a manual restart).
+    """
+    if config.TRADING_DAYS_ONLY and datetime.now(IST).weekday() >= 5:
+        return
+    refreshed = False
+    for attempt in (1, 2):
+        try:
+            refreshed = scrip_master.refresh_masters()
+        except Exception as exc:
+            logger.error("Daily scrip-master refresh failed (attempt %d/2): %s", attempt, exc)
+            refreshed = False
+        if refreshed:
+            break
+        if attempt == 1:
+            logger.warning("Scrip-master refresh incomplete — retrying once in 60s")
+            time.sleep(60)
+    if not refreshed:
+        logger.error(
+            "Daily scrip-master refresh did not complete — re-resolving from "
+            "the last cached masters; a later call will retry the download."
+        )
+    try:
+        scrip_master.warmup()
+    except Exception as exc:
+        logger.error("Scrip-master warmup failed after refresh: %s", exc, exc_info=True)
+        return
+    # Re-resolve base and stock instruments (hourly variants are rebuilt from
+    # their base inside re_resolve_instrument), then warn about any open
+    # position whose contract has rolled.
+    for inst in list(RESOLVED_INSTRUMENTS) + list(RESOLVED_STOCK_INSTRUMENTS):
+        re_resolve_instrument(inst["name"])
+    _check_rollover()
 
 
 # ── Expiry-day handling ─────────────────────────────────────────────────────────
@@ -351,6 +512,20 @@ def _expiry_squareoff_job():
         inst   = e["instrument"]
         name   = inst["name"]
         symbol = inst["kite_tradingsymbol"]
+        # A halted instrument's saved state may not match the broker — closing
+        # from it could open a naked position. The operator must close it
+        # manually today; alert loudly instead of acting.
+        if strategy_config.get_halted(name):
+            logger.critical(
+                "Expiry square-off SKIPPED for %s (%s) — instrument is HALTED; "
+                "position expires TODAY and must be closed manually on Kite!",
+                name, symbol,
+            )
+            notifier.notify_expiry_squareoff_failed(
+                name, symbol,
+                "instrument is halted (state may not match broker) — close manually TODAY",
+            )
+            continue
         # This job is scheduled one second apart from the 14:45 strategy tick,
         # so a concurrent _process_instrument() call for the same name is a
         # real possibility. Lock, then re-check the position fresh — a
@@ -373,6 +548,14 @@ def _expiry_squareoff_job():
                 set_position(state, name, 0)
                 logger.warning("Expiry square-off: closed %s (%s) — expires today", name, symbol)
                 notifier.notify_expiry_squareoff(name, symbol, e["direction"], abs(pos))
+            except OrderStatusUnknown as exc:
+                logger.critical(
+                    "Expiry square-off outcome UNKNOWN for %s (%s): %s — "
+                    "the close may or may not have filled; reconcile on Kite TODAY!",
+                    name, symbol, exc, exc_info=True,
+                )
+                _halt_instrument(name, f"Expiry square-off {symbol}: {exc}")
+                notifier.notify_expiry_squareoff_failed(name, symbol, str(exc))
             except Exception as exc:
                 logger.critical(
                     "Expiry square-off FAILED for %s (%s): %s — position still open, expires today!",
@@ -603,6 +786,19 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
 
     if not strategy_config.is_enabled(name):
         logger.info("%s: strategy disabled — skipping", name)
+        return
+
+    # ── Halt gate ──────────────────────────────────────────────────────────────
+    # Set when an order outcome could not be confirmed or a synthetic order
+    # partially filled: the saved position may not match the broker, so acting
+    # on any signal could double a position or open a naked one. Only the
+    # operator can clear it (dashboard Resume) after reconciling on Kite.
+    halted = strategy_config.get_halted(name)
+    if halted:
+        logger.warning(
+            "%s: HALTED since %s (%s) — no orders until resumed from the dashboard",
+            name, halted.get("time", "?"), halted.get("reason", ""),
+        )
         return
 
     # ── Outside market hours — skip candle fetch, hold position as-is ──────────
@@ -945,11 +1141,14 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     entry_ce_price=ce_ltp,
                     entry_pe_price=pe_ltp,
                 )
-            except RuntimeError as exc:
+            except (SyntheticPartialFill, OrderStatusUnknown) as exc:
                 logger.error("%s: Synthetic BUY failed: %s", name, exc, exc_info=True)
-                notifier.notify_synthetic_partial_fill(
-                    name, str(exc).split("CE placed")[-1][:60], "", str(exc)
-                )
+                _halt_instrument(name, f"Synthetic BUY: {exc}")
+            except Exception as exc:
+                # Definitive no-fill (leg 1 rejected, no ATM options, …) —
+                # nothing executed, safe to retry on the next signal.
+                logger.error("%s: Synthetic BUY failed: %s", name, exc, exc_info=True)
+                notifier.notify_order_rejected(name, "BUY_SYNTHETIC", sym, str(exc))
         else:
             entry_sym, entry_exchange = sym, exchange
             try:
@@ -966,6 +1165,9 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 trade_log.log_trade(name, "BUY", entry_sym, order_qty)
                 notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
                 set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
+            except OrderStatusUnknown as exc:
+                logger.error("%s: BUY outcome unknown: %s", name, exc, exc_info=True)
+                _halt_instrument(name, f"BUY {entry_sym}: {exc}")
             except Exception as exc:
                 logger.error("%s: BUY order rejected/failed: %s", name, exc, exc_info=True)
                 notifier.notify_order_rejected(name, "BUY", entry_sym, str(exc))
@@ -990,9 +1192,12 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     ce_tradingsymbol=ce_info["kite_tradingsymbol"],
                     entry_ce_price=entry_ce_ltp or ce_ltp,
                 )
+            except OrderStatusUnknown as exc:
+                logger.error("%s: Short CE SELL outcome unknown: %s", name, exc, exc_info=True)
+                _halt_instrument(name, f"Short CE SELL: {exc}")
             except Exception as exc:
                 logger.error("%s: Short CE SELL failed: %s", name, exc, exc_info=True)
-                notifier.notify_synthetic_partial_fill(name, "", "", str(exc))
+                notifier.notify_order_rejected(name, "SELL_CE", sym, str(exc))
         else:
             entry_sym, entry_exchange = sym, exchange
             try:
@@ -1009,6 +1214,9 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 trade_log.log_trade(name, "SELL", entry_sym, order_qty)
                 notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
                 set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
+            except OrderStatusUnknown as exc:
+                logger.error("%s: SELL outcome unknown: %s", name, exc, exc_info=True)
+                _halt_instrument(name, f"SELL {entry_sym}: {exc}")
             except Exception as exc:
                 logger.error("%s: SELL order rejected/failed: %s", name, exc, exc_info=True)
                 notifier.notify_order_rejected(name, "SELL", entry_sym, str(exc))
@@ -1031,9 +1239,14 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 notifier.notify_trade(name, "EXIT_LONG", ce_sym, order_qty, price)
                 set_position(state, name, 0)
                 _exit_ok = True
-            except RuntimeError as exc:
+            except (SyntheticPartialFill, OrderStatusUnknown) as exc:
                 logger.error("%s: Synthetic EXIT LONG failed: %s", name, exc, exc_info=True)
-                notifier.notify_synthetic_partial_fill(name, ce_sym, pe_sym, str(exc))
+                _halt_instrument(name, f"Synthetic EXIT LONG: {exc}")
+            except Exception as exc:
+                # Definitive no-fill on leg 1 — nothing executed, position and
+                # state both unchanged, so the exit safely retries next tick.
+                logger.error("%s: Synthetic EXIT LONG failed: %s", name, exc, exc_info=True)
+                notifier.notify_order_rejected(name, "EXIT_LONG", ce_sym, str(exc))
             if signal == "SELL" and _exit_ok and not long_only:
                 try:
                     target_premium = instrument.get("short_ce_target_premium", 300)
@@ -1044,15 +1257,19 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     trade_log.log_trade(name, "SELL_CE", ce_info["kite_tradingsymbol"], order_qty)
                     notifier.notify_trade(name, "SELL", ce_info["kite_tradingsymbol"], order_qty, price)
                     set_position(
-                        state, name, -instrument["qty"], close_price,
+                        state, name, -order_qty, close_price,
                         ce_info["kite_tradingsymbol"], exchange,
                         is_short_ce=True,
                         ce_tradingsymbol=ce_info["kite_tradingsymbol"],
                         entry_ce_price=entry_ce_ltp or ce_ltp,
                     )
+                except OrderStatusUnknown as exc:
+                    logger.error("%s: Short CE SELL after exit-long outcome unknown: %s",
+                                 name, exc, exc_info=True)
+                    _halt_instrument(name, f"Short CE SELL after exit-long: {exc}")
                 except Exception as exc:
                     logger.error("%s: Short CE SELL after exit-long failed: %s", name, exc, exc_info=True)
-                    notifier.notify_synthetic_partial_fill(name, "", "", str(exc))
+                    notifier.notify_order_rejected(name, "SELL_CE", sym, str(exc))
         else:
             # Use symbol stored in state at entry time — may differ from resolved
             # instrument if a tender-period next-month switch occurred at entry
@@ -1061,6 +1278,9 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 logger.info("%s: EXIT LONG using state symbol %s (resolved=%s)", name, exit_sym, sym)
             try:
                 close_long(kite, {**instrument, "kite_tradingsymbol": exit_sym})
+            except OrderStatusUnknown as exc:
+                logger.error("%s: EXIT LONG outcome unknown: %s", name, exc, exc_info=True)
+                _halt_instrument(name, f"EXIT LONG {exit_sym}: {exc}")
             except Exception as exc:
                 logger.error("%s: EXIT LONG order rejected/failed: %s", name, exc, exc_info=True)
                 notifier.notify_order_rejected(name, "EXIT_LONG", exit_sym, str(exc))
@@ -1080,9 +1300,14 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                             place_sell(kite, next_inst)
                             entry_sym      = next_inst["kite_tradingsymbol"]
                             entry_exchange = next_inst["exchange"]
+                            _auto_pin_and_resolve(instrument, next_inst)
                         trade_log.log_trade(name, "SELL", entry_sym, order_qty)
                         notifier.notify_trade(name, "SELL", entry_sym, order_qty, price)
                         set_position(state, name, -order_qty, close_price, entry_sym, entry_exchange)
+                    except OrderStatusUnknown as exc:
+                        logger.error("%s: SELL entry after EXIT_LONG outcome unknown: %s",
+                                     name, exc, exc_info=True)
+                        _halt_instrument(name, f"SELL after EXIT_LONG {entry_sym}: {exc}")
                     except Exception as exc:
                         logger.error("%s: SELL entry after EXIT_LONG rejected/failed: %s", name, exc, exc_info=True)
                         notifier.notify_order_rejected(name, "SELL", entry_sym, str(exc))
@@ -1104,9 +1329,13 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     notifier.notify_trade(name, "EXIT_SHORT", ce_sym, order_qty, price)
                     set_position(state, name, 0)
                     _exit_ok = True
-                except RuntimeError as exc:
+                except OrderStatusUnknown as exc:
+                    logger.error("%s: Short CE BUY-back outcome unknown: %s", name, exc, exc_info=True)
+                    _halt_instrument(name, f"Short CE BUY-back {ce_sym}: {exc}")
+                except Exception as exc:
+                    # Definitive no-fill — state unchanged, buy-back retries next tick.
                     logger.error("%s: Short CE BUY-back failed: %s", name, exc, exc_info=True)
-                    notifier.notify_synthetic_partial_fill(name, ce_sym, "", str(exc))
+                    notifier.notify_order_rejected(name, "EXIT_SHORT_CE", ce_sym, str(exc))
             else:
                 # Backward compat: close old 2-leg synthetic short
                 ce_sym = saved.get("ce_tradingsymbol", "")
@@ -1119,9 +1348,12 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     notifier.notify_trade(name, "EXIT_SHORT", pe_sym, order_qty, price)
                     set_position(state, name, 0)
                     _exit_ok = True
-                except RuntimeError as exc:
+                except (SyntheticPartialFill, OrderStatusUnknown) as exc:
                     logger.error("%s: Synthetic EXIT SHORT failed: %s", name, exc, exc_info=True)
-                    notifier.notify_synthetic_partial_fill(name, pe_sym, ce_sym, str(exc))
+                    _halt_instrument(name, f"Synthetic EXIT SHORT: {exc}")
+                except Exception as exc:
+                    logger.error("%s: Synthetic EXIT SHORT failed: %s", name, exc, exc_info=True)
+                    notifier.notify_order_rejected(name, "EXIT_SHORT", pe_sym, str(exc))
             if signal == "BUY" and _exit_ok:
                 try:
                     ce_info, pe_info = scrip_master.get_atm_options(
@@ -1134,7 +1366,7 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                     trade_log.log_trade(name, "BUY_SYNTHETIC", leg_sym, order_qty)
                     notifier.notify_trade(name, "BUY", ce_info["kite_tradingsymbol"], order_qty, price)
                     set_position(
-                        state, name, instrument["qty"], close_price,
+                        state, name, order_qty, close_price,
                         ce_info["kite_tradingsymbol"], exchange,
                         is_synthetic=True,
                         ce_tradingsymbol=ce_info["kite_tradingsymbol"],
@@ -1142,11 +1374,12 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                         entry_ce_price=ce_ltp,
                         entry_pe_price=pe_ltp,
                     )
-                except RuntimeError as exc:
+                except (SyntheticPartialFill, OrderStatusUnknown) as exc:
                     logger.error("%s: Synthetic BUY after exit-short failed: %s", name, exc, exc_info=True)
-                    notifier.notify_synthetic_partial_fill(
-                        name, str(exc).split("CE placed")[-1][:60], "", str(exc)
-                    )
+                    _halt_instrument(name, f"Synthetic BUY after exit-short: {exc}")
+                except Exception as exc:
+                    logger.error("%s: Synthetic BUY after exit-short failed: %s", name, exc, exc_info=True)
+                    notifier.notify_order_rejected(name, "BUY_SYNTHETIC", sym, str(exc))
         else:
             # Use symbol stored in state at entry time — may differ from resolved
             # instrument if a tender-period next-month switch occurred at entry
@@ -1155,6 +1388,9 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                 logger.info("%s: EXIT SHORT using state symbol %s (resolved=%s)", name, exit_sym, sym)
             try:
                 close_short(kite, {**instrument, "kite_tradingsymbol": exit_sym})
+            except OrderStatusUnknown as exc:
+                logger.error("%s: EXIT SHORT outcome unknown: %s", name, exc, exc_info=True)
+                _halt_instrument(name, f"EXIT SHORT {exit_sym}: {exc}")
             except Exception as exc:
                 logger.error("%s: EXIT SHORT order rejected/failed: %s", name, exc, exc_info=True)
                 notifier.notify_order_rejected(name, "EXIT_SHORT", exit_sym, str(exc))
@@ -1174,9 +1410,14 @@ def _process_instrument(kite, state: dict, instrument: dict, now_ist):
                             place_buy(kite, next_inst)
                             entry_sym      = next_inst["kite_tradingsymbol"]
                             entry_exchange = next_inst["exchange"]
+                            _auto_pin_and_resolve(instrument, next_inst)
                         trade_log.log_trade(name, "BUY", entry_sym, order_qty)
                         notifier.notify_trade(name, "BUY", entry_sym, order_qty, price)
                         set_position(state, name, order_qty, close_price, entry_sym, entry_exchange)
+                    except OrderStatusUnknown as exc:
+                        logger.error("%s: BUY entry after EXIT_SHORT outcome unknown: %s",
+                                     name, exc, exc_info=True)
+                        _halt_instrument(name, f"BUY after EXIT_SHORT {entry_sym}: {exc}")
                     except Exception as exc:
                         logger.error("%s: BUY entry after EXIT_SHORT rejected/failed: %s", name, exc, exc_info=True)
                         notifier.notify_order_rejected(name, "BUY", entry_sym, str(exc))
@@ -1269,6 +1510,14 @@ def _parse_time(hhmm: str):
 # ── Entry point ────────────────────────────────────────────────────────────────
 
 if __name__ == "__main__":
+    # `python main.py` runs this module as "__main__", so the webapp's
+    # `import main` would otherwise load a SECOND copy of this file whose
+    # RESOLVED_* lists are empty — which is why dashboard rollover pins always
+    # logged "not found in any instrument list" and never reached the live
+    # scheduler (observed on 2026-07-22, 08-20, 08-25). Registering the running
+    # instance under its plain name makes both names refer to one module.
+    sys.modules.setdefault("main", sys.modules[__name__])
+
     import argparse
     parser = argparse.ArgumentParser(description="Supertrend + MA Algo")
     parser.add_argument("--run-once", action="store_true",
@@ -1326,6 +1575,13 @@ if __name__ == "__main__":
     scheduler.add_job(
         notifier.notify_login_reminder,
         CronTrigger(timezone=IST, hour=8, minute=30),
+    )
+    # 08:40 — re-download scrip masters and re-resolve all contracts, so an
+    # overnight expiry/rollover or newly-listed strikes are picked up without
+    # a process restart (fires before the 09:00 market jobs).
+    scheduler.add_job(
+        _daily_refresh_job,
+        CronTrigger(timezone=IST, hour=8, minute=40),
     )
     # 09:00 — token status + active strategies
     scheduler.add_job(

@@ -292,30 +292,43 @@ def resolve_instrument(inst_def: dict) -> dict:
     return {**inst_def, **contract}
 
 
-def refresh_masters(force: bool = False):
+def refresh_masters(force: bool = False) -> bool:
     """
     Download and cache both scrip masters.
     Skips download if already cached today (unless force=True).
+
+    Returns True when both masters are confirmed current (fresh cache or both
+    downloads succeeded). On a failed download the stale disk cache stays in
+    use but the meta file is NOT stamped, so the next call retries the
+    download instead of trusting yesterday's contract universe all day.
     """
     _CACHE_DIR.mkdir(exist_ok=True)
     if not force and _is_fresh():
         logger.info("Scrip masters are up-to-date (cached today).")
-        return
+        return True
 
     logger.info("Downloading Angel scrip master …")
-    _download_angel()
+    angel_ok = _download_angel()
 
     logger.info("Downloading Kite instruments …")
-    _download_kite()
+    kite_ok = _download_kite()
 
-    # Write today's date to the meta file
-    _META_FILE.write_text(json.dumps({"date": str(date.today())}))
+    if angel_ok and kite_ok:
+        # Write today's date to the meta file
+        _META_FILE.write_text(json.dumps({"date": str(date.today())}))
+    else:
+        logger.warning(
+            "Scrip master refresh incomplete (angel_ok=%s, kite_ok=%s) — "
+            "meta not stamped; the download will be retried on the next refresh call.",
+            angel_ok, kite_ok,
+        )
 
     # Invalidate in-memory caches so they are rebuilt on next access
     global _merged_df, _options_df
     _merged_df  = None
     _options_df = None
     logger.info("Scrip masters refreshed and cached.")
+    return angel_ok and kite_ok
 
 
 def warmup():
@@ -335,38 +348,42 @@ def _is_fresh() -> bool:
     return meta.get("date") == str(date.today())
 
 
-def _download_angel():
+def _download_angel() -> bool:
+    """Return True on a successful download; False when falling back to a stale cache."""
     try:
         r = requests.get(_ANGEL_URL, timeout=60)
         r.raise_for_status()
         _ANGEL_CACHE.write_text(r.text, encoding="utf-8")
         logger.info("Angel master saved (%d bytes)", len(r.content))
+        return True
     except Exception as exc:
         if _ANGEL_CACHE.exists():
             logger.warning(
                 "Angel master download failed (%s) — using stale cache from disk.", exc
             )
-        else:
-            raise RuntimeError(
-                f"Angel master download failed and no cache exists: {exc}"
-            ) from exc
+            return False
+        raise RuntimeError(
+            f"Angel master download failed and no cache exists: {exc}"
+        ) from exc
 
 
-def _download_kite():
+def _download_kite() -> bool:
+    """Return True on a successful download; False when falling back to a stale cache."""
     try:
         r = requests.get(_KITE_URL, timeout=60)
         r.raise_for_status()
         _KITE_CACHE.write_text(r.text, encoding="utf-8")
         logger.info("Kite instruments saved (%d bytes)", len(r.content))
+        return True
     except Exception as exc:
         if _KITE_CACHE.exists():
             logger.warning(
                 "Kite instruments download failed (%s) — using stale cache from disk.", exc
             )
-        else:
-            raise RuntimeError(
-                f"Kite instruments download failed and no cache exists: {exc}"
-            ) from exc
+            return False
+        raise RuntimeError(
+            f"Kite instruments download failed and no cache exists: {exc}"
+        ) from exc
 
 
 def _get_merged() -> pd.DataFrame:

@@ -167,6 +167,40 @@ View live logs:
 
 
 --------------------------------------------------------------------------------
+8a. ALLOW THE DASHBOARD "RESTART SERVICE" BUTTON
+--------------------------------------------------------------------------------
+
+The dashboard (status bar and Settings page) has a Restart Service button.
+It runs:
+
+    sudo -n systemctl restart --no-block simplealgo
+
+The app runs as an unprivileged user, so it needs one passwordless sudo rule
+scoped to exactly that command — nothing else:
+
+    sudo visudo -f /etc/sudoers.d/simplealgo-restart
+
+Paste (adjust the user name if it is not "ubuntu"):
+
+    ubuntu ALL=(root) NOPASSWD: /usr/bin/systemctl restart --no-block simplealgo
+
+Then lock the file down and verify:
+
+    sudo chmod 0440 /etc/sudoers.d/simplealgo-restart
+    sudo -n systemctl restart --no-block simplealgo    # run AS the ubuntu user
+
+Notes:
+  - Use `which systemctl` if it is not at /usr/bin/systemctl; the path in the
+    sudoers rule must match exactly or sudo will still prompt for a password.
+  - --no-block matters: without it systemctl waits for a unit it is about to
+    stop (killing the very process that ran the command).
+  - If the rule is missing, the button reports the problem instead of failing
+    silently; the algo itself is unaffected.
+  - To use a different unit name, set SERVICE_NAME in .env. To use something
+    other than systemd, set RESTART_COMMAND in .env to the full command.
+
+
+--------------------------------------------------------------------------------
 9. CONFIGURE NGINX REVERSE PROXY
 --------------------------------------------------------------------------------
 

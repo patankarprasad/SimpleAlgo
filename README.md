@@ -10,7 +10,8 @@ orders through **Zerodha KiteConnect**.
 
 ```
 SimpleAlgo/
-├── config.py           ← instruments, strategy params, credential loading
+├── config.py           ← instrument defaults, strategy params, credential loading
+├── instrument_config.py ← runtime lots + stock-futures list (edited from /settings)
 ├── angel_login.py      ← auto-login to Angel SmartAPI (TOTP)
 ├── kite_login.py       ← auto-login to Kite (Selenium headless)
 ├── angel_data.py       ← fetch OHLCV candles from Angel
@@ -100,6 +101,27 @@ sudo journalctl -u algo -f    # live logs
 
 On expiry day, update `config.py` → `INSTRUMENTS` list with the new contract symbol
 for the next month (e.g. `GOLDM25MAYFUT` → `GOLDM25JUNFUT`).  Then restart the service.
+
+---
+
+## Changing instruments from the dashboard
+
+The **Settings** tab (`/settings`) edits what would otherwise need a code or
+`.env` change plus a restart:
+
+- **Stock futures** – add or remove NSE stocks, set the default lots and product.
+  `STOCK_FUTURES*` in `.env` now only seeds `instrument_config.json` on first
+  start; after that the dashboard is the source of truth.
+- **Lots** – per-instrument lot count for every 15-minute, hourly and stock
+  instrument. Broker order quantity is lots × lot size.
+- **Restart Service** – restarts the whole process (also on the dashboard status
+  bar). Needs the sudoers rule in DEPLOYMENT.txt section 8a.
+
+Saves are applied to the running scheduler immediately — no restart needed.
+
+An instrument holding an open position is locked: exits are sized from the
+configured lots, so changing them mid-trade would close the wrong quantity.
+Square off first.
 
 ---
 
