@@ -1,0 +1,16 @@
+# /etc/systemd/system/iob.timer
+
+[Unit]
+Description=Start IOB algo on trading mornings
+
+[Timer]
+OnCalendar=Mon-Fri 09:10:00
+# Persistent=false: if the VPS was down at 09:10 and boots at 22:00 we do NOT
+# want the missed trigger to fire and run a pointless broker login.
+# Trade-off: a reboot during market hours will not auto-restart the algo.
+# Set true if you would rather have that at the cost of late no-op runs.
+Persistent=false
+Unit=iob.service
+
+[Install]
+WantedBy=timers.target

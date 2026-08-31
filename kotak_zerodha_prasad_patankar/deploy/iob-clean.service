@@ -1,0 +1,12 @@
+# /etc/systemd/system/iob-clean.service
+# Port of the old cleanall.sh.
+
+[Unit]
+Description=Prune IOB logs
+
+[Service]
+Type=oneshot
+User=iob
+Group=iob
+ExecStart=/usr/bin/find /opt/algo/kotak_zerodha_prasad_patankar/logs -maxdepth 1 -type f -name 'Logfile_*' -delete
+ExecStart=/usr/bin/find /opt/algo/kotak_zerodha_prasad_patankar/logs -maxdepth 1 -type d -name '????-??-??' -exec rm -rf {} +

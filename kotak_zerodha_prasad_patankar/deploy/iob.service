@@ -1,0 +1,49 @@
+# /etc/systemd/system/iob.service
+#
+# Started by iob.timer, NOT enabled directly -- hence no [Install] section.
+# main.py is a daily one-shot: it exits 0 via os._exit(0) at ~23:16 after the
+# commodity session. Restart=always would therefore relaunch it all night, and
+# each relaunch does a full Kotak + Zerodha login before falling straight
+# through both loops. Restart=on-failure is required, not optional.
+#
+# This only works because utility/common_functions.py exits non-zero on login
+# failure. If those sys.exit(1) calls ever revert to sys.exit(0), a failed
+# broker login becomes indistinguishable from a clean end-of-day and the algo
+# will silently skip the trading day.
+
+[Unit]
+Description=IOB algo (prasad_patankar)
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=iob
+Group=iob
+WorkingDirectory=/opt/algo/kotak_zerodha_prasad_patankar
+ExecStart=/opt/iob-venv/bin/python -u /opt/algo/kotak_zerodha_prasad_patankar/main.py
+Restart=on-failure
+RestartSec=30
+
+# -u keeps stdout unbuffered so journalctl stays live (replaces stdbuf -oL -eL)
+
+# Files this service creates must stay group-writable, because your login
+# account manages them over SFTP as a member of the iob group.
+# Default umask 022 would make them 644 and silently lock you out: the
+# dashboard rewrites user_selection.csv as a new file (tmp + os.replace), so
+# after the first config save from the UI the file is owned by iob at 644 and
+# your next SFTP edit is refused. 0002 keeps it 664. Pairs with the setgid
+# (2770) bit on the directory, which fixes the group.
+UMask=0002
+
+# ===== hardening =====
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ReadWritePaths=/opt/algo/kotak_zerodha_prasad_patankar
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+RestrictSUIDSGID=yes

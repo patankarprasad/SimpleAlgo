@@ -1,0 +1,108 @@
+key,value,reference
+SUBSCRIPTION_IDK,,"Kotak Neo: first 6 digits are your MPIN (pad with extra digits)"
+APPROVAL_IDA,,"Angel: first 4 digits are your PIN (pad with extra digits) - unused while angel_login is off"
+,,
+RE_ENTRY,FALSE,"if premium sl is hit and indicator still suggests Entry 3 minutes later, should it take entry? TRUE for yes and FALSE for no"
+LIMITORDER,2,
+GOLD_LIMITORDER,0.3,
+SILVER_LIMITORDER,0.3,
+CRUDE_LIMITORDER,0.3,
+PRODUCTTYPE,MIS,NRML or MIS
+,,
+STRATEGY_CEB,FALSE,
+STRATEGY_C2EB,FALSE,
+STRATEGY_PEB,FALSE,TRUE
+STRATEGY_SPE,FALSE,FALSE
+STRATEGY_RCE,FALSE,
+STRATEGY_EXD,FALSE,
+STRATEGY_NCL,FALSE,
+STRATEGY_NCS,FALSE,
+STRATEGY_N2CS,FALSE,
+STRATEGY_NHF,FALSE,
+STRATEGY_GOLD,FALSE,
+STRATEGY_SILVER,FALSE,
+STRATEGY_CRUDE,FALSE,
+,,
+CEB_LOT,1,
+CEB_PSL,1,Not Used anymore
+CEB_ITM,-100,"For ATM-- itm_offset = 0 , For OTM call and ITM put-- itm_offset = positive, For ITM call and OTM put-- itm_offset = negative"
+CEB_CP,250,
+CEB_ENTRY_LIMIT,5,
+CEB_EXIT_LIMIT,5,
+,,
+C2EB_LOT,1,
+C2EB_PSL,1,Not Used anymore
+C2EB_ITM,-100,"For ATM-- itm_offset = 0 , For OTM call and ITM put-- itm_offset = positive, For ITM call and OTM put-- itm_offset = negative"
+C2EB_CP,250,
+C2EB_ENTRY_LIMIT,5,
+C2EB_EXIT_LIMIT,5,
+,,
+PEB_LOT,1,
+PEB_PSL,1,Not Used anymore
+PEB_ITM,200,"For ATM-- itm_offset = 0 , For OTM call and ITM put-- itm_offset = positive, For ITM call and OTM put-- itm_offset = negative"
+PEB_ENTRY_LIMIT,5,
+PEB_EXIT_LIMIT,5,
+,,
+SPE_LOT,1,
+SPE_PSL,50,
+SPE_HDG_DIST,-900,hdg dist is added in main strike thus we get a hedge OTM 800 points away from sold PE leg
+SPE_ITM,-100,though variable says ITM we infact want to sell PE of OTM2 so we gave a negative number from ATM
+SPE_ENTRY_LIMIT,5,
+SPE_EXIT_LIMIT,5,
+,,
+RCE_LOT,1,
+RCE_PSL,30,
+RCE_HDG_DIST,900,hdg dist is added in main strike thus we get hedge OTM 800 points away from sold CE leg
+RCE_ITM,-100,we want to sell call of ITM2 thus we gave a negative number from ATM
+RCE_ENTRY_LIMIT,5,
+RCE_EXIT_LIMIT,5,
+,,
+EXD_NIFTY_LOT,1,
+EXD_NIFTY_CP,50,
+EXD_NIFTY_PSL,40,
+EXD_NIFTY_HDG_DIST,500,
+,,
+EXD_SENSEX_LOT,1,
+EXD_SENSEX_CP,200,
+EXD_SENSEX_PSL,40,
+EXD_SENSEX_HDG_DIST,2000,
+,,
+NHF_LOT,1,
+NHF_HDG_DIST,-1000,in NHF we buy ATM CE and sell ATM PE since hdg dist is added in NHF_PE strike thus we get hedge 800 points away from sold PE leg
+NHF_ENTRY_LIMIT,5,
+NHF_EXIT_LIMIT,5,
+,,
+NCL_LOT,1,
+NCL_HDG_DIST,-1000,in NCL we buy ATM CE and sell ATM PE since hdg dist is added in NCL_PE strike thus we get hedge 800 points away from sold PE leg
+NCL_ENTRY_LIMIT,5,
+NCL_EXIT_LIMIT,5,
+,,
+NCS_LOT,1,
+NCS_HDG_DIST,1100,hdg dist is added in NCS_CE strike thus we get hedge 800 points away from sold leg
+NCS_ITM,-300,in NCS we sell ITM6 CE and buy same strike PE
+NCS_CP,300,
+NCS_ENTRY_LIMIT,5,
+NCS_EXIT_LIMIT,5,
+,,
+N2CS_LOT,1,
+N2CS_HDG_DIST,1100,hdg dist is added in NCS_CE strike thus we get hedge 800 points away from sold leg
+N2CS_ITM,-300,in NCS we sell ITM6 CE and buy same strike PE
+N2CS_CP,150,
+N2CS_ENTRY_LIMIT,5,
+N2CS_EXIT_LIMIT,5,
+,,
+GOLD_INSTRUMENT,GOLDTEN,
+SILVER_INSTRUMENT,SILVERMIC,
+CRUDE_INSTRUMENT,CRUDEOILM,
+,,
+GOLD_LOT,1,
+GOLD_ENTRY_LIMIT,5,
+GOLD_EXIT_LIMIT,5,
+,,
+SILVER_LOT,1,
+SILVER_ENTRY_LIMIT,5,
+SILVER_EXIT_LIMIT,5,
+,,
+CRUDE_LOT,1,
+CRUDE_ENTRY_LIMIT,5,
+CRUDE_EXIT_LIMIT,5,

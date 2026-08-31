@@ -1,0 +1,13 @@
+# /etc/systemd/system/iob-watchdog.service
+#
+# Restart=on-failure catches crashes but not hangs -- a process stuck on a
+# wedged socket stays "active". This is the port of monitor.sh's stale-log
+# check, the one piece of monitor.sh systemd does not replace on its own.
+# Runs as root because it calls systemctl restart.
+
+[Unit]
+Description=Restart IOB algo if its log goes stale
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/sbin/iob-watchdog.sh
